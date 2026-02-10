@@ -88,61 +88,6 @@ $("langToggle").addEventListener("click", ()=>{
 applyLang();
 
 /* ------------------------------
-   Status / empty-state helpers
------------------------------- */
-function setStatus(msg, level="warn"){
-  const el = $("statusBanner");
-  if(!el) return;
-  el.textContent = msg;
-  el.classList.remove("hidden","info","warn","err");
-  el.classList.add(level);
-}
-function clearStatus(){
-  const el = $("statusBanner");
-  if(!el) return;
-  el.textContent = "";
-  el.classList.add("hidden");
-}
-function disableControls(){
-  const ids = [
-    "runSelect","variantSelect","speciesSelect","modelSelect","mapSelect","aggSelect",
-    "t0Select","t1Select","playBtn","qcToggle","gapToggle",
-    "downloadPngBtn","downloadGeoBtn","feedbackBtn"
-  ];
-  for(const id of ids){
-    const el = $(id);
-    if(el) el.disabled = true;
-  }
-}
-
-function enableControls(){
-  const ids = [
-    "runSelect","variantSelect","speciesSelect","modelSelect","mapSelect","aggSelect",
-    "t0Select","t1Select","playBtn","qcToggle","gapToggle",
-    "downloadPngBtn","downloadGeoBtn","feedbackBtn"
-  ];
-  for(const id of ids){
-    const el = $(id);
-    if(el) el.disabled = false;
-  }
-}
-function showNoData(err){
-  console.warn(err);
-  setStatus(
-    "No generated runs found in docs/latest/ 😅\n" +
-    "Run the backend pipeline to populate docs/latest (meta_index.json + runs/...), then refresh.",
-    "warn"
-  );
-  disableControls();
-  $("top10Table").innerHTML = `<div class="muted">No runs yet. Generate outputs into <b>docs/latest/</b> ✅</div>`;
-  $("profileBox").innerHTML = `<div class="muted">Species profiles will show once a run is available.</div>`;
-  $("auditBox").textContent = "docs/latest is empty. See README for the pipeline steps.";
-  setLegend("No data");
-  // Center on Arabian Sea-ish by default
-  if(map) map.setView([18, 65], 4);
-}
-
-/* ------------------------------
    Data loading (meta + binaries)
 ------------------------------ */
 const state = {
@@ -210,9 +155,6 @@ function initMap(){
     attribution: '&copy; OpenStreetMap'
   }).addTo(map);
   markerLayer = L.layerGroup().addTo(map);
-
-  // sensible default view (used when no runs exist)
-  map.setView([18, 65], 4);
 
   map.on("click", (e)=>{
     if(!e?.latlng) return;
@@ -618,22 +560,8 @@ async function computeAndRender(){
    Run/variant/species meta wiring
 ------------------------------ */
 async function refreshMeta(){
-  clearStatus();
   // read meta_index to list runs
-  try{
-    state.index = await fetchJson("latest/meta_index.json");
-  }catch(err){
-    state.index = {latest_run_id:null, runs:[]};
-    showNoData(err);
-    return;
-  }
-
-  if(!state.index || !Array.isArray(state.index.runs) || state.index.runs.length===0){
-    showNoData("meta_index.json has no runs");
-    return;
-  }
-
-  enableControls();
+  state.index = await fetchJson("latest/meta_index.json");
   const runSelect = $("runSelect");
   runSelect.innerHTML = "";
   for(const r of state.index.runs){
@@ -655,11 +583,7 @@ async function refreshMeta(){
 
 async function refreshVariants(){
   const run = state.index.runs.find(r=>r.run_id===state.runId);
-  if(!run){
-    showNoData(`Run id not found: ${state.runId}`);
-    return;
-  }
-  state.runPath = run.path; // e.g., runs/<run_id>
+  state.runPath = run.path; // e.g., runs/demo_YYYY-MM-DD
   const variantSelect = $("variantSelect");
   variantSelect.innerHTML = "";
   for(const v of run.variants){
@@ -687,22 +611,12 @@ async function loadSpeciesMetaAndInit(){
   state.species = $("speciesSelect").value;
   // species meta path:
   const url = `latest/${state.runPath}/variants/${state.variant}/species/${state.species}/meta.json`;
-  try{
-    state.meta = await fetchJson(url);
-  }catch(err){
-    showNoData(err);
-    return;
-  }
+  state.meta = await fetchJson(url);
   state.grid = state.meta.grid;
 
   // load mask
   const maskUrl = `latest/${state.runPath}/${state.meta.paths.mask}`;
-  try{
-    state.mask = await fetchBin(maskUrl, "u8");
-  }catch(err){
-    showNoData(err);
-    return;
-  }
+  state.mask = await fetchBin(maskUrl, "u8");
 
   // time selects
   state.times = state.meta.times;
@@ -945,5 +859,5 @@ $("exportFbBtn").addEventListener("click", async ()=>{
 initMap();
 refreshMeta().catch(err=>{
   console.error(err);
-  showNoData(err);
+  alert("Failed to load demo data. Make sure you generated /docs/latest with the backend demo generator.");
 });

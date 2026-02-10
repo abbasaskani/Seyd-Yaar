@@ -8,14 +8,12 @@ A lightweight **installable PWA** + a **Python generator** that produces:
 - **Explainability**: per‑species profile (Skipjack/Yellowfin), weights, curves, top‑10 hotspots, covariate table
 - **Audit / versioning** via `meta.json` (run time, data sources, model versions, QC/gap‑fill flags, missing, etc.)
 
-✅ **No demo data is committed** in this repo.
-
-The UI reads generated outputs from `docs/latest/`.
-You generate those outputs via the backend pipeline (real data wiring / scheduled runs).
+> In this demo ZIP, the generator can create **synthetic demo data** (fast) so the UI works end‑to‑end offline.
+> Production hooks are included for **AIS effort (Global Fishing Watch)**, **MaxEnt/PPP presence‑only**, and **GeoTIFF/COG export**.
 
 ---
 
-## Quick start (Local)
+## Quick start (Demo)
 
 ### 1) Python (generator)
 ```bash
@@ -24,14 +22,11 @@ python -m venv .venv
 source .venv/bin/activate  # (Windows: .venv\Scripts\activate)
 pip install -r requirements.txt
 
-# Initialize placeholder outputs (so the UI never crashes)
-python -m seydyaar init-latest --out ../docs/latest
-
-# Then run your real pipeline (to be wired to real data sources / schedule)
-# python -m seydyaar run --date today --out ../docs/latest
+# Fast demo (few timesteps)
+python -m seydyaar demo-generate --date today --fast
 ```
 
-This prepares `../docs/latest/...` (static website reads from there).
+This writes outputs to `../docs/latest/...` (static website reads from there).
 
 ### 2) Open the PWA
 Open `docs/index.html` (or serve `docs/`):
@@ -50,7 +45,7 @@ Then open the printed local URL in your browser.
 - **MaxEnt / PPP real training**  
   Works when presence points exist (AIS proxy / CSV upload). Bias correction is supported (background sampling).
 - **COG/GeoTIFF**  
-  GeoTIFF + COG‑style tiling/overviews included (no `rio-cogeo` dependency).
+  Demo writes GeoTIFF; COG‑style tiling/overviews included (no `rio-cogeo` dependency).
 
 ---
 

@@ -1,0 +1,38 @@
+{
+  "notes": "Fill these Copernicus Marine dataset_ids/variables that match your plan. Used by run-daily.",
+  "sst": {
+    "dataset_id": "",
+    "variables": [
+      ""
+    ],
+    "product_type": "analysis_forecast"
+  },
+  "chl": {
+    "dataset_id": "",
+    "variables": [
+      ""
+    ],
+    "product_type": "analysis_forecast"
+  },
+  "ssh": {
+    "dataset_id": "",
+    "variables": [
+      ""
+    ],
+    "product_type": "analysis_forecast"
+  },
+  "currents": {
+    "dataset_id": "",
+    "variables": [
+      ""
+    ],
+    "product_type": "analysis_forecast"
+  },
+  "waves": {
+    "dataset_id": "",
+    "variables": [
+      ""
+    ],
+    "product_type": "analysis_forecast"
+  }
+}

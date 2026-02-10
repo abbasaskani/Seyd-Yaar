@@ -39,7 +39,7 @@ class HabitatInputs:
     chl_mg_m3: np.ndarray
     current_m_s: np.ndarray
     waves_hs_m: np.ndarray
-    ssh_m: np.ndarray  # optional (synthetic/tests may use zeros)
+    ssh_m: np.ndarray  # optional (demo can use zeros)
 
 def habitat_scoring(inputs: HabitatInputs, priors: Dict, weights: Dict) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
     """

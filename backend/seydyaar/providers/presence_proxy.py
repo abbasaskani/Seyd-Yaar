@@ -5,13 +5,15 @@ Three-tier strategy (preferred order):
 2) Weak labels from HSI (pseudo-presence from high suitability).
 3) Manual CSV upload (optional).
 
-Offline-friendly: if AIS isn't available or fails, we fall back to weak labels with a
-synthetic "effort" surface (explicitly marked in audit).
+Offline-friendly: if AIS isn't available, this module can generate a *synthetic* effort
+surface (explicitly marked as demo-only in meta/audit) so the workflow stays
+end-to-end testable.
 """
 
 from __future__ import annotations
 
 import csv
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -34,16 +36,10 @@ def _rng(seed: int | None) -> np.random.Generator:
 
 
 def _cell_centers(grid_lon: np.ndarray, grid_lat: np.ndarray) -> np.ndarray:
-    """Return Nx2 array of lon/lat for each cell center (row-major).
-
-    Accepts either:
-      - 2D lon/lat grids (H,W) of cell centers, or
-      - 1D lon and 1D lat arrays (then meshgrid is used).
-    """
-    if grid_lon.ndim == 2 and grid_lat.ndim == 2:
-        return np.stack([grid_lon.ravel(), grid_lat.ravel()], axis=1)
+    """Return Nx2 array of lon/lat for each cell center (row-major)."""
     lon2d, lat2d = np.meshgrid(grid_lon, grid_lat)
-    return np.stack([lon2d.ravel(), lat2d.ravel()], axis=1)
+    pts = np.stack([lon2d.ravel(), lat2d.ravel()], axis=1)
+    return pts
 
 
 def _synthetic_effort_surface(
@@ -53,7 +49,9 @@ def _synthetic_effort_surface(
     rng: np.random.Generator,
 ) -> np.ndarray:
     """Demo-only effort: smooth-ish random field with bias towards high habitat."""
+    # Base random field
     noise = rng.standard_normal(habitat_like.shape).astype(np.float32)
+    # Quick smoothing via repeated neighborhood averaging (cheap)
     for _ in range(3):
         noise = (
             noise
@@ -87,6 +85,7 @@ def _sample_points_from_surface(
     p = np.where(m, p, 0.0)
     s = float(p.sum())
     if s <= 0:
+        # Fallback uniform within mask
         idx = np.flatnonzero(m)
         choose = rng.choice(idx, size=min(n_points, idx.size), replace=False)
         return [tuple(pts[i]) for i in choose]
@@ -96,26 +95,33 @@ def _sample_points_from_surface(
     return [tuple(pts[i]) for i in choose]
 
 
-def _presence_from_csv(*, csv_path: Path, species: str, time_id: str) -> List[Tuple[float, float]]:
+def _presence_from_csv(
+    *,
+    csv_path: Path,
+    species: str,
+    time_id: str,
+) -> List[Tuple[float, float]]:
     """Read user-provided presences.
 
     CSV columns supported:
       - lat, lon (required)
       - species (optional)
-      - time (optional; matched by prefix against time_id)
+      - time (optional, can be ISO-ish; matched by prefix against time_id)
+
+    If species/time exist in the file, we filter; otherwise we use all rows.
     """
     out: List[Tuple[float, float]] = []
     with csv_path.open("r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         rows = list(reader)
 
-    has_species = any(r.get("species") for r in rows)
-    has_time = any(r.get("time") for r in rows)
+    has_species = any("species" in r and r.get("species") for r in rows)
+    has_time = any("time" in r and r.get("time") for r in rows)
 
     for r in rows:
         if has_species and r.get("species") and r.get("species").strip().lower() != species.lower():
             continue
-        if has_time and r.get("time") and time_id:
+        if has_time and r.get("time"):
             t = r.get("time").strip()
             if not time_id.startswith(t) and not t.startswith(time_id):
                 continue
@@ -125,6 +131,7 @@ def _presence_from_csv(*, csv_path: Path, species: str, time_id: str) -> List[Tu
         except Exception:
             continue
         out.append((lon, lat))
+
     return out
 
 
@@ -148,14 +155,14 @@ def build_presence_proxy(
     - mode: 'auto'|'ais'|'weak'|'csv'
     """
     rng = _rng(seed)
-    audit: Dict[str, Any] = {"requested_mode": mode}
+    audit: Dict[str, Any] = {}
 
     # 1) CSV
     if mode == "csv":
         if not csv_path or not csv_path.exists():
             raise FileNotFoundError("CSV mode requested but csv_path missing")
         pts = _presence_from_csv(csv_path=csv_path, species="", time_id=time_id)
-        audit["presence_proxy"] = {"mode": "csv", "path": str(csv_path), "n": len(pts)}
+        audit["presence_proxy"] = {"mode": "csv", "path": str(csv_path)}
         return PresenceProxyResult(mode="csv", points_lonlat=pts, effort_surface=None, audit=audit)
 
     # 2) AIS effort
@@ -164,8 +171,9 @@ def build_presence_proxy(
             gfw_cfg = load_cfg_from_env()
         if gfw_cfg is not None:
             try:
-                proxy_img, meta = fetch_effort_proxy_image(cfg=gfw_cfg, bbox=bbox, date_ymd=date_ymd)
-                effort = rasterize_effort_to_grid(proxy_img, img_meta=meta, grid_lon=grid_lon, grid_lat=grid_lat, bbox=bbox)
+                img, meta = fetch_effort_proxy_image(cfg=gfw_cfg, bbox=bbox, date_ymd=date_ymd)
+                effort = rasterize_effort_to_grid(img, img_meta=meta, grid_lon=grid_lon, grid_lat=grid_lat, bbox=bbox)
+                # Points sampled proportional to effort
                 pts = _sample_points_from_surface(
                     grid_lon=grid_lon,
                     grid_lat=grid_lat,
@@ -175,7 +183,7 @@ def build_presence_proxy(
                     rng=rng,
                 )
                 audit["presence_proxy"] = {"mode": "ais", "provider": "gfw", "zoom": gfw_cfg.zoom, "date": date_ymd}
-                return PresenceProxyResult(mode="ais", points_lonlat=pts, effort_surface=effort.astype(np.float32), audit=audit)
+                return PresenceProxyResult(mode="ais", points_lonlat=pts, effort_surface=effort, audit=audit)
             except Exception as e:
                 audit["presence_proxy_ais_error"] = str(e)
                 if mode == "ais":
@@ -191,7 +199,11 @@ def build_presence_proxy(
         n_points=n_points,
         rng=rng,
     )
-    audit["presence_proxy"] = {"mode": "weak", "method": "HSI-high-quantile", "synthetic_effort_surface": True}
+    audit["presence_proxy"] = {
+        "mode": "weak",
+        "method": "HSI-high-quantile",
+        "demo_effort_surface": True,
+    }
     return PresenceProxyResult(mode="weak", points_lonlat=pts, effort_surface=eff, audit=audit)
 
 
@@ -200,88 +212,65 @@ def build_presence_proxy_details(
     mode: str,
     grid_lon: np.ndarray,
     grid_lat: np.ndarray,
-    bbox: Tuple[float, float, float, float],
+    bbox: Tuple[float,float,float,float],
     species: str,
     presence_csv_path: Optional[str] = None,
     n_presence: int = 1500,
     seed: int = 7,
 ) -> Tuple[np.ndarray, dict, Optional[np.ndarray]]:
-    """Return (presence_idx, audit, bias_surface).
+    """Like `build_presence_proxy`, but also returns a bias surface (if available).
 
-    - presence_idx: flat indices into the (H*W) grid
-    - audit: describes the chosen proxy and any fallbacks/errors
-    - bias_surface: optional (H,W) surface in 0..1 for bias correction (or None)
+    Returns:
+        presence_idx: flat indices into the grid
+        audit: dict describing the chosen proxy and fallbacks
+        bias_surface: (H,W) surface in 0..1 for sampling bias correction (or None)
     """
     audit: dict = {"requested_mode": mode, "species": species}
-    rng = np.random.default_rng(seed)
 
-    # Normalize to 2D lon/lat grids
-    if grid_lon.ndim == 2 and grid_lat.ndim == 2:
-        H, W = grid_lon.shape
-    else:
-        H, W = int(grid_lat.size), int(grid_lon.size)
-        grid_lon, grid_lat = np.meshgrid(grid_lon, grid_lat)
-
-    # 1) CSV
+    # 1) CSV (explicit)
     if mode == "csv":
         if not presence_csv_path:
             raise ValueError("presence_csv_path is required when mode='csv'")
-        pts = _presence_from_csv(csv_path=Path(presence_csv_path), species=species, time_id="")
-        lon_min, lat_min, lon_max, lat_max = bbox
-        idx_list: list[int] = []
-        for lon, lat in pts:
-            x = int(round((lon - lon_min) / max(lon_max - lon_min, 1e-9) * (W - 1)))
-            y = int(round((lat_max - lat) / max(lat_max - lat_min, 1e-9) * (H - 1)))
-            x = max(0, min(W - 1, x))
-            y = max(0, min(H - 1, y))
-            idx_list.append(y * W + x)
-        idx = np.array(idx_list, dtype=np.int64)
+        idx = _presence_from_csv(Path(presence_csv_path), species=species, time_id=None)
         audit.update({"mode_used": "csv", "presence_points": int(idx.size), "csv": {"path": str(presence_csv_path)}})
         return idx, audit, None
 
-    # 2) AIS effort
+    # 2) AIS effort (auto/ais)
     if mode in ("auto", "ais"):
         cfg = load_cfg_from_env(zoom=4)
         if cfg is not None:
             try:
-                proxy_img, meta = fetch_effort_proxy_image(cfg=cfg, bbox=bbox, date_ymd=None)
-                effort = rasterize_effort_to_grid(proxy_img, img_meta=meta, grid_lon=grid_lon, grid_lat=grid_lat, bbox=bbox)
-                w = np.clip(effort, 0.0, 1.0)
-                flat = w.ravel().astype(np.float64)
-                s = float(flat.sum())
-                if s > 0:
-                    p = flat / s
-                    idx = rng.choice(np.arange(flat.size), size=min(n_presence, flat.size), replace=True, p=p).astype(np.int64)
+                proxy_img, meta = effort_proxy_surface(cfg, bbox)
+                effort_grid = rasterize_effort_to_grid(proxy_img, img_meta=meta, grid_lon=grid_lon, grid_lat=grid_lat, bbox=bbox)
+                # sample presence from high-effort cells
+                w = np.clip(effort_grid, 0.0, 1.0)
+                flat = w.ravel()
+                if float(flat.sum()) > 0:
+                    p = flat / float(flat.sum())
+                    rng = np.random.default_rng(seed)
+                    idx = rng.choice(np.arange(flat.size), size=min(n_presence, flat.size), replace=True, p=p)
                     audit.update({"mode_used": "ais", "presence_points": int(idx.size), "ais": {"zoom": cfg.zoom, "date_range": cfg.date_range}})
-                    return idx, audit, w.astype(np.float32)
-                audit.update({"ais": "empty_surface"})
+                    return idx.astype(np.int64), audit, w
             except Exception as e:
                 audit.update({"ais_error": str(e)})
-                if mode == "ais":
-                    raise
         else:
             audit.update({"ais": "no_token"})
+
         if mode == "ais":
+            # Explicit AIS requested, but not available.
             audit.update({"fallback": "weak"})
 
-    # 3) Weak fallback (simple habitat-like gaussian + synthetic effort)
-    lon_min, lat_min, lon_max, lat_max = bbox
-    lon0 = 0.5 * (lon_min + lon_max)
-    lat0 = 0.5 * (lat_min + lat_max)
-    sx = max((lon_max - lon_min) * 0.25, 1e-6)
-    sy = max((lat_max - lat_min) * 0.25, 1e-6)
-    hab = np.exp(-(((grid_lon - lon0) / sx) ** 2 + ((grid_lat - lat0) / sy) ** 2)).astype(np.float32)
-
-    mask_u8 = np.ones((H, W), dtype=np.uint8)
-    eff = _synthetic_effort_surface(habitat_like=hab, mask_u8=mask_u8, rng=rng)
-    prob = np.clip(hab, 0, 1) * (0.3 + 0.7 * eff)
-    flat = prob.ravel().astype(np.float64)
-    s = float(flat.sum())
-    if s <= 0:
-        idx = rng.choice(np.arange(flat.size), size=min(n_presence, flat.size), replace=False).astype(np.int64)
-    else:
-        p = flat / s
-        idx = rng.choice(np.arange(flat.size), size=min(n_presence, flat.size), replace=True, p=p).astype(np.int64)
-
-    audit.update({"mode_used": "weak", "presence_points": int(idx.size), "synthetic_effort_surface": True})
-    return idx, audit, eff.astype(np.float32)
+    # 3) weak labels fallback
+    res = build_presence_proxy(
+        mode="weak",
+        grid_lon=grid_lon,
+        grid_lat=grid_lat,
+        bbox=bbox,
+        species=species,
+        presence_csv_path=presence_csv_path,
+        n_presence=n_presence,
+        seed=seed,
+    )
+    audit.update(res.audit)
+    audit.setdefault("mode_used", res.mode_used)
+    return res.presence_idx, audit, None

@@ -4,14 +4,14 @@ const strings = {
   en: {
     h1: "Habitat × Operations → Catch Probability 🐟🌊",
     p1: "Two scientific maps—Habitat Suitability (Phabitat) and Operational Feasibility (Pops)—combine into a single catchability score: Pcatch = Phabitat × Pops. Includes uncertainty (ensemble agreement/spread), explainable top‑10 hotspots, and offline install.",
-    launch: "Launch App",
+    launch: "Launch Demo",
     install: "Install PWA",
     prevTitle: "Latest preview"
   },
   fa: {
     h1: "زیستگاه × عملیات → احتمال صید 🐟🌊",
     p1: "دو نقشه علمی—مناسبت زیستگاه (Phabitat) و امکان‌پذیری عملیاتی (Pops)—در هم ضرب می‌شوند: Pcatch = Phabitat × Pops. همراه با عدم‌قطعیت (agreement/spread)، Top‑10 توضیح‌پذیر و نصب آفلاین.",
-    launch: "اجرای اپ",
+    launch: "اجرای دمو",
     install: "نصب اپ",
     prevTitle: "آخرین پیش‌نمایش"
   }

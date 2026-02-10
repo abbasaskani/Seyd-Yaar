@@ -1,4 +1,4 @@
-const CACHE = "seydyaar-v0.3.0";
+const CACHE = "seydyaar-v0.2.0";
 const CORE = [
   "./",
   "./index.html",

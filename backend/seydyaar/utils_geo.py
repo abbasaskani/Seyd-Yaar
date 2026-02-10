@@ -45,7 +45,7 @@ def mask_from_geojson(aoi_geojson: dict, grid: GridSpec) -> np.ndarray:
     H, W = lon2d.shape
     mask = np.zeros((H, W), dtype=np.uint8)
 
-    # vectorized point-in-polygon is nontrivial; do a fast loop (H*W is small in dev/test grids)
+    # vectorized point-in-polygon is nontrivial; do a fast loop (H*W is small in demo)
     for i in range(H):
         for j in range(W):
             if pg.contains(Point(float(lon2d[i, j]), float(lat2d[i, j]))):

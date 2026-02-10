@@ -150,22 +150,6 @@ body{
   padding:14px;
 }
 .panel{padding:14px; position:relative; overflow:auto; max-height: calc(100vh - 110px);}
-
-/* Status banner (empty data / errors) */
-.statusBanner{
-  margin: 2px 0 12px 0;
-  padding: 10px 12px;
-  border-radius: 14px;
-  border: 1px solid var(--line);
-  font-weight: 900;
-  font-size: 12px;
-  line-height: 1.35;
-  background: rgba(255,255,255,0.06);
-}
-.statusBanner.info{ box-shadow: 0 0 0 1px rgba(69,201,255,0.18) inset; }
-.statusBanner.warn{ box-shadow: 0 0 0 1px rgba(255,233,90,0.18) inset; }
-.statusBanner.err{  box-shadow: 0 0 0 1px rgba(255,58,58,0.18) inset; }
-.hidden{display:none}
 .row{display:flex;gap:10px;align-items:center;margin:10px 0}
 .row.two{display:grid; grid-template-columns: 1fr 1fr; gap:10px; align-items:stretch}
 .lbl{min-width:92px;font-weight:900;font-size:12px;color:var(--muted)}

@@ -48,7 +48,7 @@ def fit_presence_background_logit(
     w = rng.normal(0, 0.05, size=(F,)).astype(np.float32)
     b = 0.0
 
-    # gradient descent (kept lightweight for dev/fast-runs)
+    # gradient descent (kept lightweight for demo/fast-runs)
     prev_loss: float | None = None
     stall = 0
     for _ in range(int(steps)):

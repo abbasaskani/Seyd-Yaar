@@ -19,13 +19,6 @@ import numpy as np
 import requests
 from PIL import Image
 
-
-# hard-coded fallback credentials
-try:
-    from seydyaar.credentials import GFW_API_TOKEN as _GFW_TOKEN_IN_CODE
-except Exception:
-    _GFW_TOKEN_IN_CODE = None
-
 GFW_BASE = "https://gateway.api.globalfishingwatch.org"
 TILE_PATH = "/v2/4wings/tile/heatmap/{z}/{x}/{y}"
 
@@ -121,29 +114,8 @@ def effort_proxy_surface(cfg: GFWConfig, bbox: Tuple[float,float,float,float]) -
     meta["bbox"] = {"lon_min":lon_min,"lon_max":lon_max,"lat_min":lat_min,"lat_max":lat_max}
     return proxy, meta
 
-
-def fetch_effort_proxy_image(cfg: GFWConfig, bbox: Tuple[float,float,float,float], date_ymd: str | None = None) -> Tuple[np.ndarray, dict]:
-    """
-    Compatibility wrapper used by other modules.
-    Returns:
-      proxy_img: 2D float32 (0..1) proxy effort intensity
-      meta: dict (includes tile/bbox info)
-    If cfg.date_range is not set and date_ymd is provided, we request a single-day range.
-    """
-    if (cfg.date_range is None) and date_ymd:
-        # one-day range (API expects "start,end")
-        cfg = GFWConfig(
-            token=cfg.token,
-            dataset=cfg.dataset,
-            interval=cfg.interval,
-            date_range=f"{date_ymd},{date_ymd}",
-            style=cfg.style,
-            zoom=cfg.zoom,
-        )
-    return effort_proxy_surface(cfg, bbox)
-
 def load_cfg_from_env(date_range: Optional[str] = None, zoom: int = 4) -> Optional[GFWConfig]:
-    tok = os.environ.get("GFW_API_TOKEN") or os.environ.get("GFW_TOKEN") or _GFW_TOKEN_IN_CODE
+    tok = os.environ.get("GFW_API_TOKEN") or os.environ.get("GFW_TOKEN")
     if not tok:
         return None
     return GFWConfig(token=tok, date_range=date_range, zoom=zoom)
