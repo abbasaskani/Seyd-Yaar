@@ -278,10 +278,15 @@ def run_daily(
             "label": prof.get("label", {}),
             "grid": run_meta["grid"],
             "times": ts_list,  # ISO list
+            "time_ids": time_ids,
             "paths": {
                 "mask": f"variants/{variant}/species/{sp}/mask_u8.bin",
                 "per_time": {
-                    "pcatch": f"variants/{variant}/species/{sp}/times/{{time}}/pcatch_f32.bin",
+                    "pcatch_scoring": f"variants/{variant}/species/{sp}/times/{time}/pcatch_scoring_f32.bin",
+                    "pcatch_frontplus": f"variants/{variant}/species/{sp}/times/{time}/pcatch_frontplus_f32.bin",
+                    "pcatch_ensemble": f"variants/{variant}/species/{sp}/times/{time}/pcatch_ensemble_f32.bin",
+                    "phab_scoring": f"variants/{variant}/species/{sp}/times/{time}/phab_f32.bin",
+                    "phab_frontplus": f"variants/{variant}/species/{sp}/times/{time}/phab_f32.bin",
                     "phab": f"variants/{variant}/species/{sp}/times/{{time}}/phab_f32.bin",
                     "pops": f"variants/{variant}/species/{sp}/times/{{time}}/pops_f32.bin",
                     "agree": f"variants/{variant}/species/{sp}/times/{{time}}/agree_f32.bin",
@@ -342,7 +347,9 @@ def run_daily(
             tdir = times_root / tid
             tdir.mkdir(parents=True, exist_ok=True)
 
-            write_bin_f32(tdir / "pcatch_f32.bin", ens)  # use ensemble as default pcatch layer
+            write_bin_f32(tdir / "pcatch_scoring_f32.bin", pcatch)
+            write_bin_f32(tdir / "pcatch_frontplus_f32.bin", m2)
+            write_bin_f32(tdir / "pcatch_ensemble_f32.bin", ens)
             write_bin_f32(tdir / "phab_f32.bin", phab)
             write_bin_f32(tdir / "pops_f32.bin", pops)
             write_bin_f32(tdir / "agree_f32.bin", agree)

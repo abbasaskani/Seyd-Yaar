@@ -123,8 +123,11 @@ function fmtTime(isoZ){
   }catch{ return isoZ; }
 }
 function timeIdFromIso(isoZ){
-  // must match python: replace ":" and "-" (keep Z)
-  return isoZ.replaceAll(":","").replaceAll("-","");
+  // Prefer run-provided time_ids mapping (supports index-style folders like 0000..0143)
+  if(state && state.isoToTimeId && state.isoToTimeId[isoZ]) return state.isoToTimeId[isoZ];
+  if(typeof isoZ !== "string") return "";
+  // Fallback: sanitize ISO (legacy demo runs)
+  return isoZ.replace(/[:\-]/g, "").replace("T","_").replace("Z","");
 }
 async function fetchJson(url){
   const r = await fetch(url, {cache:"no-store"});
@@ -517,7 +520,12 @@ async function computeAndRender(){
     }else{
       key = `pcatch_${modelKey}`;
     }
-    const url = `latest/${state.runPath}/${state.meta.paths.per_time[key].replace("{time}", tid)}`;
+    const tpl = state.meta.paths.per_time[key];
+    if(!tpl || typeof tpl !== "string"){
+      console.warn("Missing layer template:", key);
+      return new Float32Array(W*H).fill(NaN);
+    }
+    const url = `latest/${state.runPath}/${tpl.replace("{time}", tid)}`;
     return fetchBin(url, (key.endsWith("_u8")?"u8":"f32"));
   }
 
@@ -620,6 +628,9 @@ async function loadSpeciesMetaAndInit(){
 
   // time selects
   state.times = state.meta.times;
+  state.timeIds = state.meta.time_ids || state.times.map((_,i)=>String(i).padStart(4,"0"));
+  state.isoToTimeId = {};
+  for(let i=0;i<state.times.length;i++){ state.isoToTimeId[state.times[i]] = state.timeIds[i]; }
   $("t0Select").innerHTML = "";
   $("t1Select").innerHTML = "";
   for(const t of state.times){
@@ -697,16 +708,26 @@ $("playBtn").addEventListener("click", ()=>{
 function startPlay(){
   state.playing = true;
   $("playBtn").textContent = "⏸ Pause";
-  const stepH = parseInt($("stepSelect").value,10) || 6;
+
+  // Keep the selected range length fixed, and slide it forward
+  const rangeLen = Math.abs($("t1Select").selectedIndex - $("t0Select").selectedIndex);
 
   const tick = async ()=>{
-    const i = $("t1Select").selectedIndex;
-    // find next index by hours
-    let next = i+1;
-    // our dataset may be 6h; just increment and wrap
-    if(next >= state.times.length) next = 0;
-    $("t0Select").selectedIndex = next;
-    $("t1Select").selectedIndex = next;
+    const i0 = $("t0Select").selectedIndex;
+    const i1 = $("t1Select").selectedIndex;
+    const dir = (i1 >= i0) ? 1 : -1; // preserve ordering
+
+    let next0 = i0 + dir;
+    let next1 = next0 + dir*rangeLen;
+
+    // wrap
+    if(next0 < 0) next0 = state.times.length-1;
+    if(next0 >= state.times.length) next0 = 0;
+    if(next1 < 0) next1 = state.times.length-1;
+    if(next1 >= state.times.length) next1 = 0;
+
+    $("t0Select").selectedIndex = next0;
+    $("t1Select").selectedIndex = next1;
     await computeAndRender();
   };
 
