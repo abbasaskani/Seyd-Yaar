@@ -1,491 +1,412 @@
-/* Seyd‑Yaar app.js — dynamic map + aggregation + uncertainty + feedback 💠🌊 */
+/* Seyd-Yaar – app.js (Leaflet + overlays)
+   - Reads latest/meta_index.json
+   - Loads runs/prod_* outputs from docs/latest/
+   - Renders probability & uncertainty layers
+*/
+
 const $ = (id) => document.getElementById(id);
 
-const strings = {
-  en: {
-    subtitle: "Catch Probability (Habitat × Ops) + Uncertainty",
-    Run: "Run",
-    Variant: "QC / Gap‑Fill",
-    Species: "Species",
-    Model: "Model",
-    Map: "Map",
-    Aggregation: "Aggregation",
-    From: "From",
-    To: "To",
-    Top: "Top‑10 Hotspots",
-    Profile: "Species Profile (Explainable)",
-    Audit: "Audit / meta.json",
-    DownloadPNG: "Download PNG",
-    DownloadGeo: "Download GeoJSON",
-    Feedback: "+ Feedback",
-    ExportFb: "Export feedback",
-    Rating: "Rating",
-    Depth: "Gear depth (m)",
-    Notes: "Notes (optional)",
-    SaveLocal: "Save locally",
-    qcHint: "Masks low‑quality pixels (opacity)",
-    gapHint: "Uses precomputed gap‑filled variant",
-  },
-  fa: {
-    subtitle: "احتمال صید (زیستگاه × عملیات) + عدم‌قطعیت",
-    Run: "ران",
-    Variant: "QC / گپ‌فیل",
-    Species: "گونه",
-    Model: "مدل",
-    Map: "نقشه",
-    Aggregation: "تجمیع",
-    From: "از",
-    To: "تا",
-    Top: "۱۰ نقطه برتر",
-    Profile: "پروفایل گونه (توضیح‌پذیر)",
-    Audit: "Audit / meta.json",
-    DownloadPNG: "دانلود PNG",
-    DownloadGeo: "دانلود GeoJSON",
-    Feedback: "+ فیدبک",
-    ExportFb: "خروجی فیدبک",
-    Rating: "امتیاز",
-    Depth: "عمق ابزار (m)",
-    Notes: "یادداشت (اختیاری)",
-    SaveLocal: "ذخیره لوکال",
-    qcHint: "پیکسل‌های بی‌کیفیت را ماسک می‌کند (شفافیت)",
-    gapHint: "از نسخه گپ‌فیل‌شده استفاده می‌کند",
-  }
-};
-
-let lang = localStorage.getItem("lang") || "en";
-function applyLang(){
-  const t = strings[lang];
-  $("subtitle").textContent = t.subtitle;
-  $("lblRun").textContent = t.Run;
-  $("lblVariant").textContent = t.Variant;
-  $("lblSpecies").textContent = t.Species;
-  $("lblModel").textContent = t.Model;
-  $("lblMap").textContent = t.Map;
-  $("lblAgg").textContent = t.Aggregation;
-  $("lblFrom").textContent = t.From;
-  $("lblTo").textContent = t.To;
-  $("sumTop").textContent = t.Top;
-  $("sumProfile").textContent = t.Profile;
-  $("sumAudit").textContent = t.Audit;
-  $("downloadPngBtn").textContent = t.DownloadPNG;
-  $("downloadGeoBtn").textContent = t.DownloadGeo;
-  $("feedbackBtn").textContent = t.Feedback;
-  $("exportFbBtn").textContent = t.ExportFb;
-  $("fbLblRating").textContent = t.Rating;
-  $("fbLblDepth").textContent = t.Depth;
-  $("fbLblNotes").textContent = t.Notes;
-  $("saveFbBtn").textContent = t.SaveLocal;
-  $("qcHint").textContent = t.qcHint;
-  $("gapHint").textContent = t.gapHint;
-  document.body.dir = (lang === "fa") ? "rtl" : "ltr";
-}
-$("langToggle").addEventListener("click", ()=>{
-  lang = (lang === "en") ? "fa" : "en";
-  localStorage.setItem("lang", lang);
-  applyLang();
-});
-
-applyLang();
-
 /* ------------------------------
-   Data loading (meta + binaries)
+   State
 ------------------------------ */
 const state = {
-  index: null,
+  lang: localStorage.getItem("lang") || "en",
   runId: null,
   runPath: null,
-  variant: "gapfill",
+  variant: "auto",
   species: localStorage.getItem("species") || "skipjack",
   model: localStorage.getItem("model") || "ensemble",
   map: localStorage.getItem("map") || "pcatch",
   agg: localStorage.getItem("agg") || "p90",
-  times: [],
-  t0: null,
-  t1: null,
+  qcOn: true,
+  mask: null,
+  meta: null,
   grid: null,
-  mask: null,          // Uint8Array
-  meta: null,          // species meta.json
-  cache: new Map(),    // url -> typed array
-  overlay: null,
-  canvas: null,
-  ctx: null,
+  times: [],
+  index: null,
   playing: false,
   timer: null,
-  qcOn: true,
-  gapOn: false,
-  qcMaskCache: new Map(), // timeId-> Uint8Array
+  _didFit: false,
+  canvas: null
 };
 
-function fmtTime(isoZ){
-  try{
-    const d = new Date(isoZ);
-    return d.toISOString().slice(0,16).replace("T"," ");
-  }catch{ return isoZ; }
+/* ------------------------------
+   i18n
+------------------------------ */
+const i18n = {
+  en: {
+    title: "Seyd-Yaar",
+    run: "Run",
+    qc: "QC / Gap-Fill",
+    species: "Species",
+    model: "Model",
+    map: "Map",
+    agg: "Aggregation",
+    from: "From",
+    to: "To",
+    play: "▶ Play",
+    pause: "⏸ Pause",
+    downloadPng: "Download PNG",
+    downloadGeo: "Download GeoJSON",
+    feedback: "+ Feedback",
+    exportFeedback: "Export feedback"
+  },
+  fa: {
+    title: "صیدیار",
+    run: "ران / خروجی",
+    qc: "کنترل‌کیفیت / گپ‌فیل",
+    species: "گونه",
+    model: "مدل",
+    map: "نقشه",
+    agg: "تجمیع",
+    from: "از",
+    to: "تا",
+    play: "▶ پخش",
+    pause: "⏸ توقف",
+    downloadPng: "دانلود PNG",
+    downloadGeo: "دانلود GeoJSON",
+    feedback: "+ بازخورد",
+    exportFeedback: "خروجی بازخورد"
+  }
+};
+
+function applyLang(){
+  const t = i18n[state.lang] || i18n.en;
+  $("titleText").textContent = t.title;
+  $("lblRun").textContent = t.run;
+  $("lblQC").textContent = t.qc;
+  $("lblSpecies").textContent = t.species;
+  $("lblModel").textContent = t.model;
+  $("lblMap").textContent = t.map;
+  $("lblAgg").textContent = t.agg;
+  $("lblFrom").textContent = t.from;
+  $("lblTo").textContent = t.to;
+  $("downloadPngBtn").textContent = t.downloadPng;
+  $("downloadGeoBtn").textContent = t.downloadGeo;
+  $("feedbackBtn").textContent = t.feedback;
+  $("exportFeedbackBtn").textContent = t.exportFeedback;
+  $("langBtn").textContent = (state.lang === "en") ? "FA" : "EN";
 }
-function timeIdFromIso(isoZ){
-  // must match python: replace ":" and "-" (keep Z)
-  return isoZ.replaceAll(":","").replaceAll("-","");
-}
+
+$("langBtn").addEventListener("click", ()=>{
+  state.lang = (state.lang === "en") ? "fa" : "en";
+  localStorage.setItem("lang", state.lang);
+  applyLang();
+});
+
+/* ------------------------------
+   Helpers: fetch
+------------------------------ */
 async function fetchJson(url){
-  const r = await fetch(url, {cache:"no-store"});
-  if(!r.ok) throw new Error(`HTTP ${r.status} ${url}`);
-  return r.json();
+  const r = await fetch(url, { cache: "no-store" });
+  if(!r.ok) throw new Error(`${url} -> ${r.status}`);
+  return await r.json();
 }
+
 async function fetchBin(url, dtype){
-  if(state.cache.has(url)) return state.cache.get(url);
-  const r = await fetch(url);
-  if(!r.ok) throw new Error(`HTTP ${r.status} ${url}`);
+  const r = await fetch(url, { cache: "no-store" });
+  if(!r.ok) throw new Error(`${url} -> ${r.status}`);
   const buf = await r.arrayBuffer();
-  let out;
-  if(dtype === "f32") out = new Float32Array(buf);
-  else if(dtype === "u8") out = new Uint8Array(buf);
-  else out = buf;
-  state.cache.set(url, out);
+  if(dtype === "u8") return new Uint8Array(buf);
+  return new Float32Array(buf);
+}
+
+/* ------------------------------
+   Time helpers
+------------------------------ */
+function fmtTime(iso){
+  // iso: 2026-02-11T00:00:00Z
+  try{
+    const d = new Date(iso);
+    return d.toISOString().replace("T"," ").replace(".000Z","Z");
+  }catch{
+    return iso;
+  }
+}
+
+// Convert ISO to timeId like 0143, 0000, etc (matches backend)
+function timeIdFromIso(iso){
+  const d = new Date(iso);
+  const hh = String(d.getUTCHours()).padStart(2,"0");
+  const mm = String(d.getUTCMinutes()).padStart(2,"0");
+  return `${hh}${mm}`;
+}
+
+// selected times between t0..t1 inclusive
+function getSelectedTimes(){
+  const t0 = $("t0Select").selectedIndex;
+  const t1 = $("t1Select").selectedIndex;
+  const a = Math.min(t0,t1);
+  const b = Math.max(t0,t1);
+  return state.times.slice(a, b+1);
+}
+
+/* ------------------------------
+   Leaflet map init
+------------------------------ */
+let map, overlayLayer, markerLayer;
+
+function initMap(){
+  map = L.map("map", { zoomControl: false, preferCanvas: true });
+  L.control.zoom({ position: "topright" }).addTo(map);
+
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 10,
+    attribution: "&copy; OpenStreetMap"
+  }).addTo(map);
+
+  overlayLayer = L.imageOverlay("", [[0,0],[0,0]], { opacity: 0.75 }).addTo(map);
+  markerLayer = L.layerGroup().addTo(map);
+}
+
+function setLegend(title){
+  $("legendTitle").textContent = title;
+}
+
+function mapTitle(){
+  const mapKey = $("mapSelect").value;
+  const modelKey = $("modelSelect").value;
+  if(mapKey==="pcatch") return `Pcatch (Habitat×Ops) – ${modelKey}`;
+  if(mapKey==="phab") return `Habitat – ${modelKey}`;
+  if(mapKey==="pops") return "Operational Feasibility (Ops)";
+  if(mapKey==="agree") return "Ensemble Agreement";
+  if(mapKey==="spread") return "Ensemble Spread (Std)";
+  if(mapKey==="conf") return "Confidence / Coverage";
+  return `Pcatch – ${modelKey}`;
+}
+
+function colorRamp(v){
+  // v in [0,1] => red->yellow->green
+  v = Math.max(0, Math.min(1, v));
+  let r, g, b;
+  if(v < 0.5){
+    const t = v/0.5;
+    r = 255;
+    g = Math.floor(255*t);
+    b = 0;
+  }else{
+    const t = (v-0.5)/0.5;
+    r = Math.floor(255*(1-t));
+    g = 255;
+    b = 0;
+  }
+  return [r,g,b];
+}
+
+function renderOverlay(arr, conf){
+  const W = state.grid.width, H = state.grid.height;
+  const canvas = state.canvas || document.createElement("canvas");
+  canvas.width = W; canvas.height = H;
+  state.canvas = canvas;
+
+  const ctx = canvas.getContext("2d");
+  const img = ctx.createImageData(W, H);
+
+  for(let i=0;i<arr.length;i++){
+    const v = Number.isFinite(arr[i]) ? arr[i] : 0;
+    const [r,g,b] = colorRamp(v);
+    const a = conf ? Math.floor(255 * Math.max(0, Math.min(1, conf[i] ?? 1))) : 200;
+    img.data[i*4+0] = r;
+    img.data[i*4+1] = g;
+    img.data[i*4+2] = b;
+    img.data[i*4+3] = a;
+  }
+  ctx.putImageData(img, 0, 0);
+
+  const dataUrl = canvas.toDataURL("image/png");
+  const bounds = [
+    [state.grid.lat_min, state.grid.lon_min],
+    [state.grid.lat_max, state.grid.lon_max]
+  ];
+  overlayLayer.setUrl(dataUrl);
+  overlayLayer.setBounds(bounds);
+}
+
+function topKFromArray(arr, k){
+  const W = state.grid.width;
+  const H = state.grid.height;
+  const pts = [];
+  for(let i=0;i<arr.length;i++){
+    const v = arr[i];
+    if(!Number.isFinite(v)) continue;
+    pts.push({ idx:i, v });
+  }
+  pts.sort((a,b)=>b.v-a.v);
+  const out = pts.slice(0,k).map(p=>{
+    const y = Math.floor(p.idx / W);
+    const x = p.idx % W;
+    const lon = state.grid.lon_min + (state.grid.lon_max - state.grid.lon_min) * (x/(W-1));
+    const lat = state.grid.lat_min + (state.grid.lat_max - state.grid.lat_min) * (y/(H-1));
+    return { lon, lat, value: p.v };
+  });
   return out;
 }
 
-/* ------------------------------
-   Leaflet map
------------------------------- */
-let map, imageOverlay, markerLayer;
-function initMap(){
-  map = L.map('map', {preferCanvas:true});
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    maxZoom: 12,
-    attribution: '&copy; OpenStreetMap'
-  }).addTo(map);
-  markerLayer = L.layerGroup().addTo(map);
+function renderTop10(points, covs){
+  markerLayer.clearLayers();
+  const list = $("top10List");
+  list.innerHTML = "";
+  points.forEach((p, i)=>{
+    const m = L.circleMarker([p.lat, p.lon], {
+      radius: 6,
+      weight: 1,
+      color: "#fff",
+      fillColor: "#39ff88",
+      fillOpacity: 0.85
+    }).addTo(markerLayer);
 
-  map.on("click", (e)=>{
-    if(!e?.latlng) return;
-    $("fbLat").value = e.latlng.lat.toFixed(4);
-    $("fbLon").value = e.latlng.lng.toFixed(4);
+    const c = covs && covs[i] ? covs[i] : null;
+    const html = `
+      <div style="font-size:13px;line-height:1.35">
+        <b>#${i+1}</b><br/>
+        Prob: <b>${Math.round(p.value*100)}</b><br/>
+        Lat/Lon: ${p.lat.toFixed(4)}, ${p.lon.toFixed(4)}<br/>
+        ${c ? `SST: ${c.sst.toFixed(1)}°C<br/>Chl: ${c.chl.toFixed(3)} mg/m³<br/>Waves: ${c.hs.toFixed(2)} m<br/>Cur: ${c.cur.toFixed(2)} m/s` : ""}
+      </div>
+    `;
+    m.bindPopup(html);
+
+    const row = document.createElement("div");
+    row.className = "rowitem";
+    row.innerHTML = `<b>#${i+1}</b> ${p.lat.toFixed(3)}, ${p.lon.toFixed(3)} — ${Math.round(p.value*100)}`;
+    row.onclick = ()=>{ map.setView([p.lat, p.lon], 7); m.openPopup(); };
+    list.appendChild(row);
   });
-
-  // offscreen canvas
-  state.canvas = document.createElement("canvas");
-  state.ctx = state.canvas.getContext("2d", {willReadFrequently:false});
 }
 
-/* ------------------------------
-   Colormap (RdYlGn-like)
------------------------------- */
-const stops = [
-  {p:0.00, c:[255, 58, 58]},
-  {p:0.50, c:[255, 233, 90]},
-  {p:1.00, c:[57, 255, 159]},
-];
-function lerp(a,b,t){return a+(b-a)*t}
-function colorFor(v01){
-  const v = Math.min(1, Math.max(0, v01));
-  let a=stops[0], b=stops[stops.length-1];
-  for(let i=0;i<stops.length-1;i++){
-    if(v>=stops[i].p && v<=stops[i+1].p){ a=stops[i]; b=stops[i+1]; break; }
-  }
-  const t = (v - a.p) / (b.p - a.p + 1e-9);
-  return [
-    Math.round(lerp(a.c[0], b.c[0], t)),
-    Math.round(lerp(a.c[1], b.c[1], t)),
-    Math.round(lerp(a.c[2], b.c[2], t)),
-  ];
+function renderProfile(){
+  const p = state.meta?.profile || {};
+  $("profileBox").textContent = JSON.stringify(p, null, 2);
+}
+
+function renderAudit(){
+  const m = state.meta?.meta || {};
+  $("auditBox").textContent = JSON.stringify(m, null, 2);
 }
 
 /* ------------------------------
    Aggregation
 ------------------------------ */
-function aggQuantile(q){
-  const T = state._tmpT;
-  const tmp = state._tmpVals;
-  tmp.sort();
-  const idx = Math.round((T-1)*q);
-  return tmp[idx];
+function quantile(arr, q){
+  const a = Array.from(arr).sort((x,y)=>x-y);
+  if(a.length===0) return 0;
+  const pos = (a.length-1)*q;
+  const base = Math.floor(pos);
+  const rest = pos-base;
+  if(a[base+1] === undefined) return a[base];
+  return a[base] + rest*(a[base+1]-a[base]);
 }
 
 function aggregatePerPixel(arrs, method){
-  // arrs: array of Float32Array length N, values 0..1 or NaN
   const N = arrs[0].length;
-  const T = arrs.length;
   const out = new Float32Array(N);
-  const tmp = new Float32Array(T);
   for(let i=0;i<N;i++){
-    if(state.mask && state.mask[i]===0){ out[i]=NaN; continue; }
-    let k=0;
-    for(let t=0;t<T;t++){
+    const vals = [];
+    for(let t=0;t<arrs.length;t++){
       const v = arrs[t][i];
-      if(Number.isFinite(v)) tmp[k++] = v;
+      if(Number.isFinite(v)) vals.push(v);
     }
-    if(k===0){ out[i]=NaN; continue; }
+    let v=0;
+    if(vals.length===0){ out[i]=NaN; continue; }
+
     if(method==="mean"){
-      let s=0; for(let j=0;j<k;j++) s+=tmp[j];
-      out[i]=s/k;
-    }else if(method==="max"){
-      let m=-1; for(let j=0;j<k;j++) if(tmp[j]>m) m=tmp[j];
-      out[i]=m;
-    }else if(method==="median"){
-      // sort first k values (small)
-      const slice = tmp.subarray(0,k);
-      slice.sort();
-      out[i]=slice[Math.floor((k-1)*0.5)];
-    }else if(method==="p90"){
-      const slice = tmp.subarray(0,k);
-      slice.sort();
-      out[i]=slice[Math.floor((k-1)*0.9)];
-    }else{
-      let s=0; for(let j=0;j<k;j++) s+=tmp[j];
-      out[i]=s/k;
+      v = vals.reduce((a,b)=>a+b,0)/vals.length;
+    } else if(method==="median"){
+      v = quantile(vals, 0.5);
+    } else if(method==="max"){
+      v = Math.max(...vals);
+    } else { // p90
+      v = quantile(vals, 0.90);
     }
+    out[i] = v;
   }
   return out;
 }
 
 /* ------------------------------
-   Rendering to overlay
+   Covariates sampling for explainability
 ------------------------------ */
-function setLegend(title){
-  const el = $("legend");
-  el.innerHTML = `
-    <div style="font-weight:900; margin-bottom:6px">${title}</div>
-    <div class="bar"></div>
-    <div class="row2"><span>Low</span><span>High</span></div>
-  `;
-}
-
-function renderOverlay(arr01, conf01){
-  const {width:W, height:H, bounds} = state.grid;
-  state.canvas.width = W;
-  state.canvas.height = H;
-  const img = state.ctx.createImageData(W, H);
-  const data = img.data;
-
-  const N = W*H;
-
-  for(let i=0;i<N;i++){
-    const v = arr01[i];
-    const ok = Number.isFinite(v);
-    const c = ok ? colorFor(v) : [0,0,0];
-    const a = ok ? Math.round(255 * Math.min(1, Math.max(0, conf01[i] ?? 1))) : 0;
-    const p = i*4;
-    data[p+0]=c[0];
-    data[p+1]=c[1];
-    data[p+2]=c[2];
-    data[p+3]=a;
-  }
-  state.ctx.putImageData(img, 0, 0);
-  const url = state.canvas.toDataURL("image/png");
-
-  const b = [[bounds[0][0], bounds[0][1]], [bounds[1][0], bounds[1][1]]]; // [[S,W],[N,E]]
-  if(!imageOverlay){
-    imageOverlay = L.imageOverlay(url, b, {opacity: 1.0, interactive:false}).addTo(map);
-  }else{
-    imageOverlay.setUrl(url);
-    imageOverlay.setBounds(b);
-  }
-}
-
-/* ------------------------------
-   Top‑10 extraction + UI
------------------------------- */
-function topKFromArray(arr, k=10){
-  const W = state.grid.width, H = state.grid.height;
-  const lonMin = state.grid.lon_min, lonMax = state.grid.lon_max;
-  const latMin = state.grid.lat_min, latMax = state.grid.lat_max;
-  const dx = (lonMax - lonMin) / (W-1);
-  const dy = (latMax - latMin) / (H-1);
-  // keep best k (simple insertion)
-  const best = [];
-  for(let i=0;i<arr.length;i++){
-    const v = arr[i];
-    if(!Number.isFinite(v)) continue;
-    if(best.length < k){
-      best.push({i,v});
-      best.sort((a,b)=>a.v-b.v);
-    }else if(v > best[0].v){
-      best[0] = {i,v};
-      best.sort((a,b)=>a.v-b.v);
-    }
-  }
-  best.sort((a,b)=>b.v-a.v);
-  return best.map((x,rank)=>{
-    const r = Math.floor(x.i / W);
-    const c = x.i % W;
-    const lon = lonMin + c*dx;
-    const lat = latMax - r*dy;
-    return {rank:rank+1, lat, lon, p: x.v};
-  });
-}
-
-function renderTop10(list, covs){
-  // covs optional: {sst, chl, current, waves, front}
-  markerLayer.clearLayers();
-  const rows = [];
-  for(const pt of list){
-    const popup = `
-      <div style="font-weight:900">#${pt.rank} • P=${(pt.p*100).toFixed(1)}</div>
-      <div class="muted">Lat ${pt.lat.toFixed(4)} • Lon ${pt.lon.toFixed(4)}</div>
-    `;
-    L.circleMarker([pt.lat, pt.lon], {
-      radius: 6,
-      weight: 1,
-      color: "#ffffff",
-      fillColor: "#39ff9f",
-      fillOpacity: 0.75
-    }).addTo(markerLayer).bindPopup(popup);
-
-    const sst = covs?.sst?.[pt.rank-1];
-    const chl = covs?.chl?.[pt.rank-1];
-    const cur = covs?.current?.[pt.rank-1];
-    const wav = covs?.waves?.[pt.rank-1];
-    rows.push({
-      "#": pt.rank,
-      "P%": (pt.p*100).toFixed(1),
-      "Lat": pt.lat.toFixed(4),
-      "Lon": pt.lon.toFixed(4),
-      "SST": (sst!=null)? sst.toFixed(2) : "—",
-      "Chl": (chl!=null)? chl.toFixed(3) : "—",
-      "Cur": (cur!=null)? cur.toFixed(2) : "—",
-      "Hs": (wav!=null)? wav.toFixed(2) : "—",
-    });
-  }
-
-  // table
-  let html = `<table><thead><tr>${Object.keys(rows[0]||{"#":0}).map(k=>`<th>${k}</th>`).join("")}</tr></thead><tbody>`;
-  for(const r of rows){
-    html += `<tr>${Object.values(r).map(v=>`<td>${v}</td>`).join("")}</tr>`;
-  }
-  html += `</tbody></table>`;
-  $("top10Table").innerHTML = html;
-}
-
-/* ------------------------------
-   Profile + audit
------------------------------- */
-function renderProfile(){
-  const sp = state.meta?.species_profile;
-  if(!sp){ $("profileBox").innerHTML = "—"; return; }
-  const p = sp.priors;
-  const w = sp.layer_weights;
-  const refs = (sp.references||[]).map(x=>`<li>${x}</li>`).join("");
-  $("profileBox").innerHTML = `
-    <div><b>${sp.label?.en || ""}</b> • <span class="muted">${sp.scientific_name||""}</span></div>
-    <div class="muted">Region: ${sp.region||"—"}</div>
-    <div style="margin-top:8px"><b>Priors</b></div>
-    <ul class="bullets">
-      <li>SST opt/sigma: ${p.sst_opt_c}°C / ${p.sst_sigma_c}</li>
-      <li>Chl opt: ${p.chl_opt_mg_m3} mg/m³ (σ log10=${p.chl_sigma_log10})</li>
-      <li>Current opt/sigma: ${p.current_opt_m_s} m/s / ${p.current_sigma_m_s}</li>
-      <li>Waves soft max: ${p.waves_hs_soft_max_m} m</li>
-    </ul>
-    <div><b>Layer weights</b></div>
-    <ul class="bullets">
-      <li>Temp: ${w.temp} • Chl: ${w.chl} • Front: ${w.front} • Current: ${w.current} • Waves: ${w.waves}</li>
-    </ul>
-    <div><b>Key references</b></div>
-    <ul class="bullets">${refs}</ul>
-    <div class="muted small">${sp.notes||""}</div>
-  `;
-}
-
-function renderAudit(){
-  const meta = state.meta;
-  if(!meta){ $("auditBox").textContent="—"; return; }
-  $("auditBox").textContent = JSON.stringify({
-    run_id: meta.run_id,
-    variant: meta.variant,
-    species: meta.species,
-    defaults: meta.defaults,
-    ppp_model: meta.ppp_model,
-    grid: meta.grid,
-    times: meta.times?.length,
-  }, null, 2);
-}
-
-/* ------------------------------
-   Compute & update view
------------------------------- */
-function getSelectedTimes(){
-  const i0 = $("t0Select").selectedIndex;
-  const i1 = $("t1Select").selectedIndex;
-  const a = Math.min(i0,i1);
-  const b = Math.max(i0,i1);
-  return state.times.slice(a, b+1);
-}
-
-function mapTitle(){
-  const m = $("mapSelect").value;
-  if(m==="pcatch") return "Pcatch (Habitat×Ops)";
-  if(m==="phab") return "Habitat Suitability";
-  if(m==="pops") return "Operational Feasibility";
-  if(m==="agree") return "Agreement (ensemble)";
-  if(m==="spread") return "Spread/Std (ensemble)";
-  if(m==="conf") return "Confidence / Opacity";
-  return m;
-}
-
 async function loadCovAtPoints(timeIso, points){
-  // For table explainability at hotspots: sample covariates nearest grid cell
-  const timeId = timeIdFromIso(timeIso);
-  const W = state.grid.width, H = state.grid.height;
-  const lonMin = state.grid.lon_min, lonMax = state.grid.lon_max;
-  const latMin = state.grid.lat_min, latMax = state.grid.lat_max;
-  const dx = (lonMax - lonMin) / (W-1);
-  const dy = (latMax - latMin) / (H-1);
+  try{
+    const tid = timeIdFromIso(timeIso);
+    const covPaths = state.meta?.paths?.covariates || null;
+    if(!covPaths) return null;
 
-  async function loadArr(key, dtype){
-    const url = `latest/${state.runPath}/${state.meta.paths.per_time[key].replace("{time}", timeId)}`;
-    return fetchBin(url, dtype);
-  }
-  const [sst, chl, cur, wav] = await Promise.all([
-    loadArr("sst","f32"), loadArr("chl","f32"), loadArr("current","f32"), loadArr("waves","f32")
-  ]);
+    const loadOne = async (name, dtype="f32")=>{
+      const url = `latest/${state.runPath}/${covPaths[name].replace("{time}", tid)}`;
+      return await fetchBin(url, dtype);
+    };
 
-  const out = {sst:[], chl:[], current:[], waves:[]};
-  for(const pt of points){
-    const c = Math.round((pt.lon - lonMin)/dx);
-    const r = Math.round((latMax - pt.lat)/dy);
-    const rr = Math.min(H-1, Math.max(0, r));
-    const cc = Math.min(W-1, Math.max(0, c));
-    const idx = rr*W+cc;
-    out.sst.push(sst[idx]);
-    out.chl.push(chl[idx]);
-    out.current.push(cur[idx]);
-    out.waves.push(wav[idx]);
+    const sst = await loadOne("sst","f32");
+    const chl = await loadOne("chl","f32");
+    const hs  = await loadOne("hs","f32");
+    const cur = await loadOne("cur_spd","f32");
+
+    const W = state.grid.width;
+    return points.map(p=>{
+      // nearest pixel
+      const x = Math.round((p.lon - state.grid.lon_min) / (state.grid.lon_max - state.grid.lon_min) * (W-1));
+      const y = Math.round((p.lat - state.grid.lat_min) / (state.grid.lat_max - state.grid.lat_min) * (state.grid.height-1));
+      const xi = Math.max(0, Math.min(W-1, x));
+      const yi = Math.max(0, Math.min(state.grid.height-1, y));
+      const idx = yi*W + xi;
+      return {
+        sst: sst[idx],
+        chl: chl[idx],
+        hs: hs[idx],
+        cur: cur[idx]
+      };
+    });
+  }catch(e){
+    console.warn("Covariate sampling failed:", e);
+    return null;
   }
-  return out;
 }
 
+/* ------------------------------
+   Confidence aggregation (QC mask + analysis/forecast)
+------------------------------ */
 async function getConfAggregated(timeIsos){
-  // aggregate confidence similarly to probs (but mean)
   const W = state.grid.width, H = state.grid.height;
-  const promises = timeIsos.map(t=>{
-    const tid = timeIdFromIso(t);
-    const url = `latest/${state.runPath}/${state.meta.paths.per_time.conf.replace("{time}", tid)}`;
-    return fetchBin(url,"f32");
-  });
-  const arrs = await Promise.all(promises);
-  const conf = aggregatePerPixel(arrs, "mean");
+  const N = W*H;
+  const conf = new Float32Array(N);
+  conf.fill(1);
 
-  // QC mask if toggle
-  if(state.qcOn){
-    const qcArrs = await Promise.all(timeIsos.map(async t=>{
-      const tid = timeIdFromIso(t);
-      const url = `latest/${state.runPath}/${state.meta.paths.per_time.qc_chl.replace("{time}", tid)}`;
-      return fetchBin(url,"u8");
-    }));
-    const qcMean = new Float32Array(conf.length);
-    for(let i=0;i<conf.length;i++){
-      if(state.mask && state.mask[i]===0){ qcMean[i]=0; continue; }
-      let s=0, k=0;
-      for(let t=0;t<qcArrs.length;t++){
-        s += (qcArrs[t][i] > 0) ? 1 : 0;
-        k++;
-      }
-      qcMean[i] = (k>0)? (s/k) : 1;
+  // base mask (AOI / ocean)
+  if(state.mask){
+    for(let i=0;i<N;i++){
+      if(state.mask[i] === 0) conf[i] = 0;
     }
-    for(let i=0;i<conf.length;i++) conf[i] = conf[i] * qcMean[i];
   }
+
+  // QC mask (chlorophyll) mean across time range
+  if(state.qcOn && state.meta?.paths?.per_time?.qc_chl){
+    try{
+      const qcArrs = await Promise.all(timeIsos.map(async (t)=>{
+        const tid = timeIdFromIso(t);
+        const url = `latest/${state.runPath}/${state.meta.paths.per_time.qc_chl.replace("{time}", tid)}`;
+        return await fetchBin(url,"u8");
+      }));
+      for(let i=0;i<N;i++){
+        if(conf[i]===0) continue;
+        let s=0, k=0;
+        for(let t=0;t<qcArrs.length;t++){
+          s += (qcArrs[t][i] > 0) ? 1 : 0;
+          k++;
+        }
+        conf[i] *= (k>0 ? (s/k) : 1);
+      }
+    }catch(e){
+      console.warn("QC aggregation failed:", e);
+    }
+  }
+
   return conf;
 }
 
+/* ------------------------------
+   Core compute
+------------------------------ */
 async function computeAndRender(){
   localStorage.setItem("species", state.species);
   localStorage.setItem("model", state.model);
@@ -501,6 +422,8 @@ async function computeAndRender(){
   // load arrays for selected layer
   async function loadLayerForTime(timeIso){
     const tid = timeIdFromIso(timeIso);
+
+    // choose meta key expected for selected map/model
     let key = null;
     if(mapKey==="pcatch"){
       key = `pcatch_${modelKey}`;
@@ -517,19 +440,40 @@ async function computeAndRender(){
     }else{
       key = `pcatch_${modelKey}`;
     }
-    const url = `latest/${state.runPath}/${state.meta.paths.per_time[key].replace("{time}", tid)}`;
-    return fetchBin(url, (key.endsWith("_u8")?"u8":"f32"));
+
+    // ✅ Guard: some runs may not include every key (e.g. ppp/ensemble extras)
+    const perTime = (state.meta && state.meta.paths && state.meta.paths.per_time) ? state.meta.paths.per_time : {};
+    const tpl = perTime[key];
+
+    // If missing, return a NaN-array so the app doesn't crash (and you see a warning)
+    if(!tpl || typeof tpl !== "string"){
+      console.warn("Missing per_time template for key:", key, "available keys:", Object.keys(perTime));
+      const nan = new Float32Array(W*H);
+      nan.fill(NaN);
+      return nan;
+    }
+
+    const url = `latest/${state.runPath}/${tpl.replace("{time}", tid)}`;
+    const dtype = (tpl.includes("u8") || tpl.includes("_u8")) ? "u8" : "f32";
+
+    try{
+      return await fetchBin(url, dtype);
+    }catch(err){
+      console.warn("Failed to fetch layer:", {key, url, err});
+      const nan = new Float32Array(W*H);
+      nan.fill(NaN);
+      return nan;
+    }
   }
 
   const arrs = await Promise.all(timeIsos.map(loadLayerForTime));
   let aggMethod = $("aggSelect").value;
-  // For conf map we always mean
   if(mapKey==="conf") aggMethod = "mean";
 
   const arrAgg = aggregatePerPixel(arrs, aggMethod);
 
   const confAgg = (mapKey==="conf")
-    ? (()=>{ // visualize confidence itself (as "prob")
+    ? (()=>{ // visualize confidence itself
         const c = new Float32Array(arrAgg.length);
         for(let i=0;i<c.length;i++){
           c[i] = Number.isFinite(arrAgg[i]) ? 1.0 : 0.0;
@@ -538,29 +482,24 @@ async function computeAndRender(){
       })()
     : await getConfAggregated(timeIsos);
 
-  // render
   setLegend(mapTitle());
   renderOverlay(arrAgg, confAgg);
 
-  // fit bounds on first load
   if(!state._didFit){
     map.fitBounds([[state.grid.lat_min, state.grid.lon_min],[state.grid.lat_max, state.grid.lon_max]]);
     state._didFit = true;
   }
 
-  // top10 from aggregated (for catch & habitat & ops)
   const top = topKFromArray(arrAgg, 10);
-  // covariates sampled at midpoint time for explainability
   const midTime = timeIsos[Math.floor(timeIsos.length/2)];
   const covs = await loadCovAtPoints(midTime, top);
   renderTop10(top, covs);
 }
 
 /* ------------------------------
-   Run/variant/species meta wiring
+   Meta wiring
 ------------------------------ */
 async function refreshMeta(){
-  // read meta_index to list runs
   state.index = await fetchJson("latest/meta_index.json");
   const runSelect = $("runSelect");
   runSelect.innerHTML = "";
@@ -583,7 +522,8 @@ async function refreshMeta(){
 
 async function refreshVariants(){
   const run = state.index.runs.find(r=>r.run_id===state.runId);
-  state.runPath = run.path; // e.g., runs/demo_YYYY-MM-DD
+  state.runPath = run.path;
+
   const variantSelect = $("variantSelect");
   variantSelect.innerHTML = "";
   for(const v of run.variants){
@@ -593,14 +533,11 @@ async function refreshVariants(){
     variantSelect.appendChild(opt);
   }
 
-  // Keep gap toggle in sync with variant
-  const preferred = ($("gapToggle").checked) ? "gapfill" : "base";
-  state.variant = run.variants.includes(preferred) ? preferred : run.variants[0];
+  state.variant = run.variants[0];
   variantSelect.value = state.variant;
 
   variantSelect.addEventListener("change", async ()=>{
     state.variant = variantSelect.value;
-    $("gapToggle").checked = (state.variant === "gapfill");
     await loadSpeciesMetaAndInit();
   });
 
@@ -609,17 +546,15 @@ async function refreshVariants(){
 
 async function loadSpeciesMetaAndInit(){
   state.species = $("speciesSelect").value;
-  // species meta path:
+
   const url = `latest/${state.runPath}/variants/${state.variant}/species/${state.species}/meta.json`;
   state.meta = await fetchJson(url);
   state.grid = state.meta.grid;
 
-  // load mask
   const maskUrl = `latest/${state.runPath}/${state.meta.paths.mask}`;
   state.mask = await fetchBin(maskUrl, "u8");
 
-  // time selects
-  state.times = state.meta.times;
+  state.times = state.meta.times || [];
   $("t0Select").innerHTML = "";
   $("t1Select").innerHTML = "";
   for(const t of state.times){
@@ -630,12 +565,11 @@ async function loadSpeciesMetaAndInit(){
     $("t0Select").appendChild(o0);
     $("t1Select").appendChild(o1);
   }
-  // default range: today window (middle)
+
   const mid = Math.floor(state.times.length/2);
   $("t0Select").selectedIndex = Math.max(0, mid-1);
   $("t1Select").selectedIndex = Math.min(state.times.length-1, mid+1);
 
-  // defaults persisted
   $("speciesSelect").value = state.species;
   $("modelSelect").value = state.model;
   $("mapSelect").value = state.map;
@@ -643,8 +577,6 @@ async function loadSpeciesMetaAndInit(){
 
   renderProfile();
   renderAudit();
-
-  // compute
   await computeAndRender();
 }
 
@@ -658,7 +590,6 @@ async function loadSpeciesMetaAndInit(){
     state.map = $("mapSelect").value;
     state.agg = $("aggSelect").value;
 
-    // if species changed, reload meta (different profile + files)
     if(id==="speciesSelect"){
       await loadSpeciesMetaAndInit();
       return;
@@ -672,20 +603,6 @@ $("qcToggle").addEventListener("change", async ()=>{
   await computeAndRender();
 });
 
-$("gapToggle").addEventListener("change", async ()=>{
-  // Switch variant to base/gapfill if available
-  const want = $("gapToggle").checked ? "gapfill" : "base";
-  const run = state.index.runs.find(r=>r.run_id===state.runId);
-  if(run.variants.includes(want)){
-    state.variant = want;
-    $("variantSelect").value = want;
-    await loadSpeciesMetaAndInit();
-  }else{
-    // revert
-    $("gapToggle").checked = (state.variant==="gapfill");
-  }
-});
-
 /* animation */
 $("playBtn").addEventListener("click", ()=>{
   if(state.playing){
@@ -694,24 +611,32 @@ $("playBtn").addEventListener("click", ()=>{
     startPlay();
   }
 });
+
 function startPlay(){
   state.playing = true;
   $("playBtn").textContent = "⏸ Pause";
   const stepH = parseInt($("stepSelect").value,10) || 6;
 
+  // keep the current window size while playing (instead of forcing From==To)
+  const span = Math.max(0, $("t1Select").selectedIndex - $("t0Select").selectedIndex);
+
   const tick = async ()=>{
-    const i = $("t1Select").selectedIndex;
-    // find next index by hours
-    let next = i+1;
-    // our dataset may be 6h; just increment and wrap
-    if(next >= state.times.length) next = 0;
-    $("t0Select").selectedIndex = next;
-    $("t1Select").selectedIndex = next;
+    const i0 = $("t0Select").selectedIndex;
+    let next0 = i0 + 1;
+    if(next0 >= state.times.length) next0 = 0;
+
+    let next1 = next0 + span;
+    if(next1 >= state.times.length) next1 = state.times.length - 1;
+
+    $("t0Select").selectedIndex = next0;
+    $("t1Select").selectedIndex = next1;
+
     await computeAndRender();
   };
 
   state.timer = setInterval(tick, 900);
 }
+
 function stopPlay(){
   state.playing = false;
   $("playBtn").textContent = "▶ Play";
@@ -720,7 +645,7 @@ function stopPlay(){
 }
 
 /* ------------------------------
-   Download / Share
+   Download
 ------------------------------ */
 $("downloadPngBtn").addEventListener("click", ()=>{
   const url = state.canvas.toDataURL("image/png");
@@ -733,23 +658,21 @@ $("downloadPngBtn").addEventListener("click", ()=>{
 });
 
 $("downloadGeoBtn").addEventListener("click", async ()=>{
-  // create GeoJSON from current top10 markers (recompute quickly from current canvas arrays not accessible; use DOM table)
-  // We'll regenerate from last render by reading markers from markerLayer
   const feats = [];
   markerLayer.eachLayer(l=>{
     const latlng = l.getLatLng();
     feats.push({
       type:"Feature",
-      properties:{},
-      geometry:{type:"Point", coordinates:[latlng.lng, latlng.lat]}
+      geometry:{ type:"Point", coordinates:[latlng.lng, latlng.lat] },
+      properties:{}
     });
   });
-  const fc = {type:"FeatureCollection", features: feats};
-  const blob = new Blob([JSON.stringify(fc, null, 2)], {type:"application/geo+json"});
+  const gj = { type:"FeatureCollection", features: feats };
+  const blob = new Blob([JSON.stringify(gj)], { type:"application/json" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = `seydyaar_top10_${state.runId}_${state.variant}_${state.species}.geojson`;
+  a.download = `seydyaar_top10_${state.runId}_${state.species}.geojson`;
   document.body.appendChild(a);
   a.click();
   a.remove();
@@ -757,107 +680,15 @@ $("downloadGeoBtn").addEventListener("click", async ()=>{
 });
 
 /* ------------------------------
-   Feedback (IndexedDB)
+   Boot
 ------------------------------ */
-const DB_NAME = "seydyaar_feedback_db";
-const STORE = "feedback";
-function openDb(){
-  return new Promise((resolve,reject)=>{
-    const req = indexedDB.open(DB_NAME, 1);
-    req.onupgradeneeded = () => {
-      const db = req.result;
-      const store = db.createObjectStore(STORE, {keyPath:"id"});
-      store.createIndex("ts","timestamp");
-    };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
+function boot(){
+  applyLang();
+  initMap();
+  refreshMeta().catch(e=>{
+    console.error(e);
+    alert("Failed to load meta_index.json. Check docs/latest/ exists and Pages is serving it.");
   });
 }
-async function saveFeedback(rec){
-  const db = await openDb();
-  return new Promise((resolve,reject)=>{
-    const tx = db.transaction(STORE, "readwrite");
-    tx.objectStore(STORE).put(rec);
-    tx.oncomplete = ()=>resolve(true);
-    tx.onerror = ()=>reject(tx.error);
-  });
-}
-async function listFeedback(){
-  const db = await openDb();
-  return new Promise((resolve,reject)=>{
-    const tx = db.transaction(STORE, "readonly");
-    const req = tx.objectStore(STORE).getAll();
-    req.onsuccess = ()=>resolve(req.result || []);
-    req.onerror = ()=>reject(req.error);
-  });
-}
-function closeModal(){ $("modal").classList.add("hidden"); }
-function openModal(){ $("modal").classList.remove("hidden"); }
 
-$("feedbackBtn").addEventListener("click", openModal);
-$("closeModal").addEventListener("click", closeModal);
-$("modal").addEventListener("click", (e)=>{ if(e.target.id==="modal") closeModal(); });
-
-let lastFbTs = 0;
-$("saveFbBtn").addEventListener("click", async ()=>{
-  const now = Date.now();
-  if(now - lastFbTs < 5000){
-    $("fbHint").textContent = "Rate limit: please wait a few seconds 🙏";
-    return;
-  }
-  const rating = $("fbRating").value;
-  const lat = parseFloat($("fbLat").value);
-  const lon = parseFloat($("fbLon").value);
-  const depth = parseInt($("fbDepth").value,10);
-  const notes = ($("fbNotes").value || "").slice(0, 500);
-
-  // validation
-  if(!Number.isFinite(lat) || !Number.isFinite(lon)){
-    $("fbHint").textContent = "Please set lat/lon (click on map) ✅";
-    return;
-  }
-  if(lat < state.grid.lat_min-2 || lat > state.grid.lat_max+2 || lon < state.grid.lon_min-2 || lon > state.grid.lon_max+2){
-    $("fbHint").textContent = "Lat/Lon outside AOI bounds ⚠️";
-    return;
-  }
-
-  const rec = {
-    id: `${now}_${Math.round(lat*10000)}_${Math.round(lon*10000)}`,
-    timestamp: new Date(now).toISOString(),
-    lat, lon,
-    species: state.species,
-    gear_depth_m: depth,
-    rating,
-    notes,
-    run_id: state.runId,
-    variant: state.variant,
-    model: state.model,
-  };
-  await saveFeedback(rec);
-  lastFbTs = now;
-  $("fbHint").textContent = "Saved locally ✅ (IndexedDB)";
-  setTimeout(()=>{$("fbHint").textContent = "Saved to IndexedDB. Anti‑spam: rate‑limit + basic validation.";}, 2200);
-  closeModal();
-});
-
-$("exportFbBtn").addEventListener("click", async ()=>{
-  const all = await listFeedback();
-  const blob = new Blob([JSON.stringify(all, null, 2)], {type:"application/json"});
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `seydyaar_feedback_export.json`;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
-});
-
-/* ------------------------------
-   Bootstrap
------------------------------- */
-initMap();
-refreshMeta().catch(err=>{
-  console.error(err);
-  alert("Failed to load demo data. Make sure you generated /docs/latest with the backend demo generator.");
-});
+boot();
