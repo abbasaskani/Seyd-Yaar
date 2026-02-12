@@ -69,7 +69,7 @@ def main() -> None:
     p2.add_argument("--date", default="today", help="Anchor date (YYYY-MM-DD) or 'today' (UTC)")
     p2.add_argument("--past-days", type=int, default=7, help="Past days to include (max 7 recommended)")
     p2.add_argument("--future-days", type=int, default=4, help="Future days to include (max 4 recommended)")
-    p2.add_argument("--step-hours", type=int, default=2, help="Time step in hours (default 2)")
+    p2.add_argument("--step-hours", type=int, default=6, help="Time step in hours (default 6)")
     p2.add_argument("--out", default=str(Path("docs") / "latest"), help="Output folder")
     p2.add_argument("--grid", default="220x220", help="Grid WxH, e.g. 220x220")
 

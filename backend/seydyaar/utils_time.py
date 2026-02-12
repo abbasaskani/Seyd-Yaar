@@ -44,7 +44,7 @@ def _parse_anchor_date(anchor_date: str, now_utc: dt.datetime) -> dt.datetime:
     d = dt.date.fromisoformat(anchor_date)
     return dt.datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=dt.timezone.utc)
 
-def timestamps_for_range(anchor_date: str = "today", past_days: int = 0, future_days: int = 0, step_hours: int = 2) -> list[str]:
+def timestamps_for_range(anchor_date: str = "today", past_days: int = 0, future_days: int = 0, step_hours: int =  6) -> list[str]:
     now_utc, _ = trusted_utc_now()
     anchor = _parse_anchor_date(anchor_date, now_utc)
     start = anchor - dt.timedelta(days=max(past_days, 0))
@@ -63,3 +63,13 @@ def build_time_index(timestamps: list[str]) -> dict:
     id_by_ts = {ts: f"{i:04d}" for i, ts in enumerate(timestamps)}
     ts_by_id = {v: k for k, v in id_by_ts.items()}
     return {"timestamps": timestamps, "id_by_ts": id_by_ts, "ts_by_id": ts_by_id}
+
+
+def time_id_from_iso(iso_ts: str) -> str:
+    """Filesystem-safe time id for per-time folders.
+    Format: YYYYMMDD_HHMMZ (UTC).
+    """
+    s = iso_ts.replace("Z", "+00:00")
+    t = dt.datetime.fromisoformat(s).astimezone(dt.timezone.utc)
+    return t.strftime("%Y%m%d_%H%MZ")
+

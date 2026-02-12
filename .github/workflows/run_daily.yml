@@ -30,7 +30,8 @@ jobs:
           COPERNICUS_MARINE_PASSWORD: ${{ secrets.COPERNICUS_MARINE_PASSWORD }}
           GFW_API_TOKEN: ${{ secrets.GFW_API_TOKEN }}
         run: |
-          PYTHONPATH=backend python -m seydyaar run-daily --out docs/latest --past-days 7 --future-days 4 --step-hours 2
+          # Product rule: 6-hour cadence, keep 2 days past + up to 10 days forecast
+          PYTHONPATH=backend python -m seydyaar run-daily --out docs/latest --past-days 2 --future-days 10 --step-hours 6
 
       - name: Commit outputs
         run: |

@@ -88,6 +88,40 @@ $("langToggle").addEventListener("click", ()=>{
 applyLang();
 
 /* ------------------------------
+   Theme + Toasts + Mobile sheet
+------------------------------ */
+function setTheme(theme){
+  document.body.setAttribute("data-theme", theme);
+  localStorage.setItem("theme", theme);
+  const btn = $("themeToggle");
+  if(btn) btn.textContent = (theme === "light") ? "☀️" : "🌙";
+}
+setTheme(localStorage.getItem("theme") || "dark");
+$("themeToggle")?.addEventListener("click", ()=>{
+  const cur = document.body.getAttribute("data-theme") || "dark";
+  setTheme(cur === "dark" ? "light" : "dark");
+  toast(lang==="fa" ? "تم عوض شد" : "Theme switched", "ok");
+});
+
+function toast(message, kind="ok", title=""){
+  const host = $("toastHost");
+  if(!host) return;
+  const t = document.createElement("div");
+  t.className = `toast ${kind}`;
+  const ttl = title || (kind==="ok" ? (lang==="fa"?"اوکی":"OK") : kind==="warn" ? (lang==="fa"?"هشدار":"Warning") : (lang==="fa"?"خطا":"Error"));
+  t.innerHTML = `<div class="tTitle">${ttl}</div><div class="tMsg">${message}</div>`;
+  host.appendChild(t);
+  setTimeout(()=>{t.style.opacity="0";t.style.transform="translateY(6px)";}, 3200);
+  setTimeout(()=>{t.remove();}, 3800);
+}
+
+// Bottom sheet behavior on mobile
+const panel = $("panel");
+$("sheetHandle")?.addEventListener("click", ()=>{
+  panel?.classList.toggle("open");
+});
+
+/* ------------------------------
    Data loading (meta + binaries)
 ------------------------------ */
 const state = {
@@ -110,6 +144,12 @@ const state = {
   canvas: null,
   ctx: null,
   playing: false,
+  autoCompute: false,
+  dirty: true,
+  userAoi: null,
+  userMask: null,
+  filterAoi: null,
+  filterMask: null,
   timer: null,
   qcOn: true,
   gapOn: false,
@@ -129,6 +169,16 @@ function timeIdFromIso(isoZ){
   // Fallback: sanitize ISO (legacy demo runs)
   return isoZ.replace(/[:\-]/g, "").replace("T","_").replace("Z","");
 }
+
+function timeIdToIso(tid){
+  // Expected: YYYYMMDD_HHMMZ
+  try{
+    const m = String(tid).match(/^(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})Z$/);
+    if(!m) return String(tid);
+    const [_, y, mo, d, hh, mm] = m;
+    return `${y}-${mo}-${d}T${hh}:${mm}:00Z`;
+  }catch{ return String(tid); }
+}
 async function fetchJson(url){
   const r = await fetch(url, {cache:"no-store"});
   if(!r.ok) throw new Error(`HTTP ${r.status} ${url}`);
@@ -147,6 +197,74 @@ async function fetchBin(url, dtype){
   return out;
 }
 
+
+function pointInRing(lon, lat, ring){
+  // ray casting; ring: [[lon,lat],...]
+  let inside = false;
+  for(let i=0,j=ring.length-1;i<ring.length;j=i++){
+    const xi=ring[i][0], yi=ring[i][1];
+    const xj=ring[j][0], yj=ring[j][1];
+    const intersect = ((yi>lat)!==(yj>lat)) && (lon < (xj-xi)*(lat-yi)/((yj-yi)||1e-12)+xi);
+    if(intersect) inside = !inside;
+  }
+  return inside;
+}
+function pointInPolygon(lon, lat, poly){
+  // poly: [outerRing, hole1, hole2...]
+  if(!poly || !poly.length) return false;
+  if(!pointInRing(lon,lat,poly[0])) return false;
+  for(let h=1;h<poly.length;h++){
+    if(pointInRing(lon,lat,poly[h])) return false;
+  }
+  return true;
+}
+function pointInGeoJSON(lon, lat, gj){
+  if(!gj) return false;
+  const g = gj.type==="Feature" ? gj.geometry : (gj.type==="FeatureCollection" ? null : gj);
+  if(g){
+    const t=g.type;
+    if(t==="Polygon") return pointInPolygon(lon,lat,g.coordinates);
+    if(t==="MultiPolygon") return g.coordinates.some(p=>pointInPolygon(lon,lat,p));
+    return false;
+  }
+  if(gj.type==="FeatureCollection"){
+    return gj.features.some(f=>{
+      const gg=f.geometry;
+      if(!gg) return false;
+      if(gg.type==="Polygon") return pointInPolygon(lon,lat,gg.coordinates);
+      if(gg.type==="MultiPolygon") return gg.coordinates.some(p=>pointInPolygon(lon,lat,p));
+      return false;
+    });
+  }
+  return false;
+}
+function buildMaskFromGeoJSON(gj){
+  const W = state.grid.width, H = state.grid.height;
+  const lonMin = state.grid.lon_min, lonMax = state.grid.lon_max;
+  const latMin = state.grid.lat_min, latMax = state.grid.lat_max;
+  const dx = (lonMax - lonMin) / (W-1);
+  const dy = (latMax - latMin) / (H-1);
+  const m = new Uint8Array(W*H);
+  for(let r=0;r<H;r++){
+    const lat = latMax - r*dy;
+    for(let c=0;c<W;c++){
+      const lon = lonMin + c*dx;
+      const idx = r*W+c;
+      // Respect server land/valid mask if present
+      if(state.baseMask && state.baseMask[idx]===0){ m[idx]=0; continue; }
+      m[idx] = pointInGeoJSON(lon,lat,gj) ? 1 : 0;
+    }
+  }
+  return m;
+}
+function combineMask(base, extra){
+  if(!extra) return base;
+  const out = new Uint8Array(base.length);
+  for(let i=0;i<base.length;i++){
+    out[i] = (base[i] && extra[i]) ? 1 : 0;
+  }
+  return out;
+}
 /* ------------------------------
    Leaflet map
 ------------------------------ */
@@ -211,7 +329,8 @@ function aggregatePerPixel(arrs, method){
   const out = new Float32Array(N);
   const tmp = new Float32Array(T);
   for(let i=0;i<N;i++){
-    if(state.mask && state.mask[i]===0){ out[i]=NaN; continue; }
+    // mask applied at aggregation time (server mask × user AOI)
+    if(state.analysisMask && state.analysisMask[i]===0){ out[i]=NaN; continue; }
     let k=0;
     for(let t=0;t<T;t++){
       const v = arrs[t][i];
@@ -322,25 +441,30 @@ function renderTop10(list, covs){
   markerLayer.clearLayers();
   const rows = [];
   for(const pt of list){
+    const showOnMap = (pt.rank<=10);
     const popup = `
       <div style="font-weight:900">#${pt.rank} • P=${(pt.p*100).toFixed(1)}</div>
       <div class="muted">Lat ${pt.lat.toFixed(4)} • Lon ${pt.lon.toFixed(4)}</div>
     `;
-    L.circleMarker([pt.lat, pt.lon], {
-      radius: 6,
-      weight: 1,
-      color: "#ffffff",
-      fillColor: "#39ff9f",
-      fillOpacity: 0.75
-    }).addTo(markerLayer).bindPopup(popup);
+    if(showOnMap){
+      const icon = L.divIcon({
+        className: "",
+        html: `<div class="pulseMarker" style="width:14px;height:14px;border-radius:999px;background:rgba(57,255,159,0.88);border:1px solid rgba(255,255,255,0.85)"></div>`,
+        iconSize: [14,14],
+        iconAnchor: [7,7]
+      });
+      L.marker([pt.lat, pt.lon], {icon}).addTo(markerLayer).bindPopup(popup);
+    }
 
     const sst = covs?.sst?.[pt.rank-1];
     const chl = covs?.chl?.[pt.rank-1];
     const cur = covs?.current?.[pt.rank-1];
     const wav = covs?.waves?.[pt.rank-1];
+    const pPct = pt.p*100;
+    const badgeClass = (pPct>=70) ? "good" : (pPct>=40) ? "mid" : "bad";
     rows.push({
       "#": pt.rank,
-      "P%": (pt.p*100).toFixed(1),
+      "P%": `<span class="badge ${badgeClass}">${pPct.toFixed(1)}%</span>`,
       "Lat": pt.lat.toFixed(4),
       "Lon": pt.lon.toFixed(4),
       "SST": (sst!=null)? sst.toFixed(2) : "—",
@@ -476,7 +600,7 @@ async function getConfAggregated(timeIsos){
     }));
     const qcMean = new Float32Array(conf.length);
     for(let i=0;i<conf.length;i++){
-      if(state.mask && state.mask[i]===0){ qcMean[i]=0; continue; }
+      if(state.analysisMask && state.analysisMask[i]===0){ qcMean[i]=0; continue; }
       let s=0, k=0;
       for(let t=0;t<qcArrs.length;t++){
         s += (qcArrs[t][i] > 0) ? 1 : 0;
@@ -487,6 +611,41 @@ async function getConfAggregated(timeIsos){
     for(let i=0;i<conf.length;i++) conf[i] = conf[i] * qcMean[i];
   }
   return conf;
+}
+
+function applyFilterMaskToArray(arr){
+  // After analysis: optionally filter results by a second AOI (post-filter)
+  if(!state.filterMask) return arr;
+  const out = new Float32Array(arr.length);
+  for(let i=0;i<arr.length;i++){
+    const v = arr[i];
+    if(!Number.isFinite(v)){ out[i]=NaN; continue; }
+    out[i] = (state.filterMask[i]===1) ? v : NaN;
+  }
+  return out;
+}
+
+function getTopFilter(){
+  const minP = parseFloat($("minP")?.value ?? "0")/100;
+  const lim = parseInt($("topLimit")?.value ?? "100");
+  return {minP, lim};
+}
+
+function renderFromCache(){
+  if(!state.lastComputed) return;
+  const {arrAgg, confAgg, timeIsos} = state.lastComputed;
+  const arrShown = applyFilterMaskToArray(arrAgg);
+  const confShown = (confAgg && confAgg.length===arrShown.length) ? confAgg : new Float32Array(arrShown.length).fill(1);
+
+  setLegend(mapTitle());
+  renderOverlay(arrShown, confShown);
+
+  const {minP, lim} = getTopFilter();
+  const topAll = topKFromArray(arrShown, 100);
+  const topFiltered = topAll.filter(x=>x.p >= minP).slice(0, Math.min(100, lim));
+
+  const midTime = timeIsos[Math.floor(timeIsos.length/2)];
+  loadCovAtPoints(midTime, topFiltered).then(covs=>renderTop10(topFiltered, covs));
 }
 
 async function computeAndRender(){
@@ -547,8 +706,11 @@ async function computeAndRender(){
     : await getConfAggregated(timeIsos);
 
   // render
-  setLegend(mapTitle());
-  renderOverlay(arrAgg, confAgg);
+  // cache raw (pre-filter)
+  state.lastComputed = {arrAgg, confAgg, timeIsos};
+
+  // render with post-filter + top filters
+  renderFromCache();
 
   // fit bounds on first load
   if(!state._didFit){
@@ -557,11 +719,7 @@ async function computeAndRender(){
   }
 
   // top10 from aggregated (for catch & habitat & ops)
-  const top = topKFromArray(arrAgg, 10);
-  // covariates sampled at midpoint time for explainability
-  const midTime = timeIsos[Math.floor(timeIsos.length/2)];
-  const covs = await loadCovAtPoints(midTime, top);
-  renderTop10(top, covs);
+  // Top table rendered inside renderFromCache()
 }
 
 /* ------------------------------
@@ -620,17 +778,34 @@ async function loadSpeciesMetaAndInit(){
   // species meta path:
   const url = `latest/${state.runPath}/variants/${state.variant}/species/${state.species}/meta.json`;
   state.meta = await fetchJson(url);
+  // run-level meta for availability reporting + deduped time catalog
+  state.runMeta = await fetchJson(`latest/${state.runPath}/meta.json`).catch(()=>null);
   state.grid = state.meta.grid;
 
-  // load mask
+  // load server mask
   const maskUrl = `latest/${state.runPath}/${state.meta.paths.mask}`;
-  state.mask = await fetchBin(maskUrl, "u8");
+  state.baseMask = await fetchBin(maskUrl, "u8");
 
-  // time selects
-  state.times = state.meta.times;
-  state.timeIds = state.meta.time_ids || state.times.map((_,i)=>String(i).padStart(4,"0"));
+  // effective analysis mask = server mask × user AOI
+  state.analysisMask = combineMask(state.baseMask, state.userMask);
+
+  // time selects (prefer runMeta.available_time_ids to avoid listing missing future bins)
+  const availableTimeIds = state.runMeta?.available_time_ids || state.meta.time_ids || [];
+  state.timeIds = availableTimeIds;
+  state.times = availableTimeIds.map(timeIdToIso);
   state.isoToTimeId = {};
   for(let i=0;i<state.times.length;i++){ state.isoToTimeId[state.times[i]] = state.timeIds[i]; }
+
+  // availability info panel
+  const lastTid = state.runMeta?.latest_available_time_id || (state.timeIds[state.timeIds.length-1]||null);
+  if($("availabilityInfo")){
+    if(lastTid){
+      const lastIso = timeIdToIso(lastTid);
+      $("availabilityInfo").innerHTML = `<b>${lang==="fa"?"آخرین دیتای موجود":"Latest available data"}</b><br><span class="muted">${fmtTime(lastIso)} (UTC)</span>`;
+    }else{
+      $("availabilityInfo").innerHTML = `<b>${lang==="fa"?"دیتایی یافت نشد":"No data found"}</b>`;
+    }
+  }
   $("t0Select").innerHTML = "";
   $("t1Select").innerHTML = "";
   for(const t of state.times){
@@ -652,11 +827,76 @@ async function loadSpeciesMetaAndInit(){
   $("mapSelect").value = state.map;
   $("aggSelect").value = state.agg;
 
+
+  // AOI UI defaults (bbox = grid bounds)
+  $("bboxLatMin").value = state.grid.lat_min.toFixed(4);
+  $("bboxLatMax").value = state.grid.lat_max.toFixed(4);
+  $("bboxLonMin").value = state.grid.lon_min.toFixed(4);
+  $("bboxLonMax").value = state.grid.lon_max.toFixed(4);
+  // Don't erase user's AOI on species switch if it exists (AOI is a user intent)
+  if(!state.userMask){
+    state.userMask = null;
+  }
+  state.analysisMask = combineMask(state.baseMask, state.userMask);
+  // init filter bbox defaults too
+  $("filterBboxLatMin").value = state.grid.lat_min.toFixed(4);
+  $("filterBboxLatMax").value = state.grid.lat_max.toFixed(4);
+  $("filterBboxLonMin").value = state.grid.lon_min.toFixed(4);
+  $("filterBboxLonMax").value = state.grid.lon_max.toFixed(4);
+  updateAoiStatus();
+
+  // filter status
+  updateFilterAoiStatus();
+
+  // Leaflet draw layer + controls (once)
+  if(!state._drawInit){
+    state._drawInit = true;
+    // Two AOIs: analysis + filter
+    state.drawLayer = new L.FeatureGroup();
+    map.addLayer(state.drawLayer);
+    state.drawTarget = "analysis";
+
+    // Keep last drawn shapes separated (for styling and status)
+    state.drawnAnalysis = null;
+    state.drawnFilter = null;
+
+    // Focus decides where draw goes
+    $("aoiText").addEventListener("focus", ()=> state.drawTarget = "analysis");
+    $("filterAoiText").addEventListener("focus", ()=> state.drawTarget = "filter");
+
+    const drawControl = new L.Control.Draw({
+      edit: { featureGroup: state.drawLayer },
+      draw: { polyline:false, circle:false, circlemarker:false, marker:false }
+    });
+    map.addControl(drawControl);
+
+    map.on(L.Draw.Event.CREATED, (e)=>{
+      // Style by target
+      if(state.drawTarget === "filter"){
+        if(state.drawnFilter) state.drawLayer.removeLayer(state.drawnFilter);
+        e.layer.setStyle?.({color:"#ffe95a", weight:2, fillOpacity:0.05});
+        state.drawnFilter = e.layer;
+        state.drawLayer.addLayer(e.layer);
+        const gj = e.layer.toGeoJSON();
+        $("filterAoiText").value = JSON.stringify(gj, null, 2);
+        applyFilterAoiFromText();
+      }else{
+        if(state.drawnAnalysis) state.drawLayer.removeLayer(state.drawnAnalysis);
+        e.layer.setStyle?.({color:"#39ff9f", weight:2, fillOpacity:0.05});
+        state.drawnAnalysis = e.layer;
+        state.drawLayer.addLayer(e.layer);
+        const gj = e.layer.toGeoJSON();
+        $("aoiText").value = JSON.stringify(gj, null, 2);
+        applyUserAoiFromText();
+      }
+    });
+  }
+
   renderProfile();
   renderAudit();
 
   // compute
-  await computeAndRender();
+  setDirty();
 }
 
 /* ------------------------------
@@ -672,15 +912,16 @@ async function loadSpeciesMetaAndInit(){
     // if species changed, reload meta (different profile + files)
     if(id==="speciesSelect"){
       await loadSpeciesMetaAndInit();
+      setDirty("Species changed. Press Analyze.");
       return;
     }
-    await computeAndRender();
+    setDirty();
   });
 });
 
 $("qcToggle").addEventListener("change", async ()=>{
   state.qcOn = $("qcToggle").checked;
-  await computeAndRender();
+  setDirty();
 });
 
 $("gapToggle").addEventListener("change", async ()=>{
@@ -696,6 +937,215 @@ $("gapToggle").addEventListener("change", async ()=>{
     $("gapToggle").checked = (state.variant==="gapfill");
   }
 });
+
+$("analyzeBtn").addEventListener("click", async ()=>{
+  state.dirty = false;
+  $("dirtyHint").textContent = (lang==="fa") ? "در حال تحلیل..." : "Analyzing…";
+  $("top10Table").innerHTML = `<div class="skeleton" style="height:180px"></div>`;
+  toast(lang==="fa" ? "در حال بارگذاری داده‌ها" : "Loading data…", "ok", lang==="fa"?"تحلیل":"Analyze");
+  try{ await computeAndRender(); }
+  catch(err){
+    console.error(err);
+    toast(lang==="fa" ? "داده برای این بازه هنوز آماده نیست. اگر تحلیل در حال اجراست، کمی بعد دوباره امتحان کن." : "Data not available for this selection yet. If a backend run is in progress, try again later.", "warn", lang==="fa"?"در دسترس نیست":"Not ready");
+    $("dirtyHint").textContent = (lang==="fa") ? "داده هنوز آماده نیست" : "Not ready yet";
+    return;
+  }
+  $("dirtyHint").textContent = (lang==="fa") ? "انجام شد ✅" : "Done ✅";
+});
+
+$("lookbackSelect").addEventListener("change", ()=>{ applyLookback(); setDirty("Lookback changed. Press Analyze."); });
+$("t1Select").addEventListener("change", ()=>{ applyLookback(); });
+function applyLookback(){
+  const d = parseInt($("lookbackSelect").value||"0");
+  if(!d || !state.times?.length) return;
+  const t1Iso = $("t1Select").value;
+  const t1 = new Date(t1Iso);
+  const t0 = new Date(t1.getTime() - d*24*3600*1000);
+  // choose closest available time >= t0
+  let bestIdx=0, bestDt=1e18;
+  for(let i=0;i<state.times.length;i++){
+    const tt = new Date(state.times[i]);
+    const diff = Math.abs(tt.getTime() - t0.getTime());
+    if(diff<bestDt){ bestDt=diff; bestIdx=i; }
+  }
+  $("t0Select").selectedIndex = bestIdx;
+}
+
+
+
+function setDirty(msg){
+  state.dirty = true;
+  $("dirtyHint").textContent = msg || "Change settings, then press Analyze.";
+}
+
+function parsePointsToPolygonGeoJSON(txt, name="points_poly"){
+  // Accept lines like: "lat,lon" or "lat lon" or "lon,lat" if user prefixes with "lon:" (kept simple)
+  const lines = (txt||"").split(/\r?\n/).map(l=>l.trim()).filter(Boolean);
+  const pts = [];
+  for(const l of lines){
+    const parts = l.split(/[,\s]+/).filter(Boolean);
+    if(parts.length<2) continue;
+    const a = parseFloat(parts[0]), b = parseFloat(parts[1]);
+    if(!isFinite(a)||!isFinite(b)) continue;
+    // assume lat,lon (most common). We'll treat |lat|<=90 as lat.
+    let lat=a, lon=b;
+    if(Math.abs(a)>90 && Math.abs(b)<=90){ lon=a; lat=b; }
+    pts.push([lon, lat]);
+  }
+  if(pts.length < 3) throw new Error("Need at least 3 points");
+  // close ring
+  if(pts[0][0]!==pts[pts.length-1][0] || pts[0][1]!==pts[pts.length-1][1]) pts.push(pts[0]);
+  return {type:"Feature", properties:{name}, geometry:{type:"Polygon", coordinates:[pts]}};
+}
+
+function updateAoiStatus(){
+  const on = !!state.userMask;
+  $("aoiStatus").textContent = on ? "AOI: active ✅ (mask applied)" : "AOI: none (using server mask)";
+}
+function applyUserAoiFromText(){
+  try{
+    const raw = $("aoiText").value.trim();
+    if(!raw){ state.userAoi=null; state.userMask=null; updateAoiStatus(); setDirty("AOI cleared. Press Analyze."); return; }
+    const gj = JSON.parse(raw);
+    state.userAoi = gj;
+    state.userMask = buildMaskFromGeoJSON(gj);
+    state.analysisMask = combineMask(state.baseMask, state.userMask);
+    updateAoiStatus();
+    setDirty("AOI updated. Press Analyze.");
+  }catch(err){
+    alert("Invalid GeoJSON ❌");
+  }
+}
+$("useAoiBtn").addEventListener("click", ()=>applyUserAoiFromText());
+$("clearAoiBtn").addEventListener("click", ()=>{
+  $("aoiText").value="";
+  if(state.drawnAnalysis){ state.drawLayer?.removeLayer(state.drawnAnalysis); state.drawnAnalysis=null; }
+  state.userAoi=null; state.userMask=null;
+  state.analysisMask = combineMask(state.baseMask, state.userMask);
+  updateAoiStatus();
+  setDirty("AOI cleared. Press Analyze.");
+});
+$("aoiFile").addEventListener("change", async (e)=>{
+  const f = e.target.files?.[0];
+  if(!f) return;
+  const txt = await f.text();
+  $("aoiText").value = txt;
+  applyUserAoiFromText();
+});
+$("useBboxBtn").addEventListener("click", ()=>{
+  const latMin=parseFloat($("bboxLatMin").value), latMax=parseFloat($("bboxLatMax").value);
+  const lonMin=parseFloat($("bboxLonMin").value), lonMax=parseFloat($("bboxLonMax").value);
+  if(!isFinite(latMin)||!isFinite(latMax)||!isFinite(lonMin)||!isFinite(lonMax)){ alert("Invalid bbox"); return; }
+  const poly = [[
+    [lonMin,latMin],[lonMax,latMin],[lonMax,latMax],[lonMin,latMax],[lonMin,latMin]
+  ]];
+  const gj = {type:"Feature", properties:{name:"bbox"}, geometry:{type:"Polygon", coordinates:poly}};
+  $("aoiText").value = JSON.stringify(gj, null, 2);
+  // draw on map
+  try{
+    if(state.drawnAnalysis) state.drawLayer?.removeLayer(state.drawnAnalysis);
+    const lyr = L.geoJSON(gj, {style:{color:"#39ff9f", weight:2, fillOpacity:0.05}});
+
+$("usePointsBtn").addEventListener("click", ()=>{
+  const txt = $("aoiPoints")?.value?.trim();
+  if(!txt){ alert("Please paste points (lat,lon) first."); return; }
+  try{
+    const gj = parsePointsToPolygonGeoJSON(txt, "points");
+    $("aoiText").value = JSON.stringify(gj, null, 2);
+    // draw on map
+    try{
+      if(state.drawnAnalysis) state.drawLayer?.removeLayer(state.drawnAnalysis);
+      const lyr = L.geoJSON(gj, {style:{color:"#39ff9f", weight:2, fillOpacity:0.05}});
+      lyr.eachLayer(l=>{ state.drawnAnalysis = l; state.drawLayer?.addLayer(l); });
+      // fit bounds
+      try{ map.fitBounds(lyr.getBounds(), {padding:[20,20]}); }catch(e){}
+    }catch(e){}
+    applyUserAoiFromText();
+  }catch(err){
+    alert("Invalid points list ❌ (need ≥3 points)");
+  }
+});
+    lyr.eachLayer(l=>{ state.drawnAnalysis = l; state.drawLayer?.addLayer(l); });
+  }catch(e){}
+  applyUserAoiFromText();
+});
+
+// ---- Filter AOI (post-analysis) ----
+function updateFilterAoiStatus(){
+  const on = !!state.filterMask;
+  $("filterAoiStatus").textContent = on ? "Filter: active ✅" : "Filter: none";
+}
+function applyFilterAoiFromText(){
+  try{
+    const raw = $("filterAoiText").value.trim();
+    if(!raw){ state.filterAoi=null; state.filterMask=null; updateFilterAoiStatus(); renderFromCache(); return; }
+    const gj = JSON.parse(raw);
+    state.filterAoi = gj;
+    // filter mask should still respect analysis mask
+    const m = buildMaskFromGeoJSON(gj);
+    state.filterMask = combineMask(state.analysisMask || state.baseMask, m);
+    updateFilterAoiStatus();
+    renderFromCache();
+  }catch(err){
+    alert("Invalid Filter GeoJSON ❌");
+  }
+}
+
+$("useFilterAoiBtn").addEventListener("click", ()=>applyFilterAoiFromText());
+$("clearFilterAoiBtn").addEventListener("click", ()=>{
+  $("filterAoiText").value="";
+  if(state.drawnFilter){ state.drawLayer?.removeLayer(state.drawnFilter); state.drawnFilter=null; }
+  state.filterAoi=null; state.filterMask=null;
+  updateFilterAoiStatus();
+  renderFromCache();
+});
+$("filterAoiFile").addEventListener("change", async (e)=>{
+  const f = e.target.files?.[0];
+  if(!f) return;
+  const txt = await f.text();
+  $("filterAoiText").value = txt;
+  applyFilterAoiFromText();
+});
+$("useFilterBboxBtn").addEventListener("click", ()=>{
+  const latMin=parseFloat($("filterBboxLatMin").value), latMax=parseFloat($("filterBboxLatMax").value);
+  const lonMin=parseFloat($("filterBboxLonMin").value), lonMax=parseFloat($("filterBboxLonMax").value);
+  if(!isFinite(latMin)||!isFinite(latMax)||!isFinite(lonMin)||!isFinite(lonMax)){ alert("Invalid bbox"); return; }
+  const poly = [[[lonMin,latMin],[lonMax,latMin],[lonMax,latMax],[lonMin,latMax],[lonMin,latMin]]];
+  const gj = {type:"Feature", properties:{name:"filter_bbox"}, geometry:{type:"Polygon", coordinates:poly}};
+  $("filterAoiText").value = JSON.stringify(gj, null, 2);
+  try{
+    if(state.drawnFilter) state.drawLayer?.removeLayer(state.drawnFilter);
+    const lyr = L.geoJSON(gj, {style:{color:"#ffe95a", weight:2, fillOpacity:0.05}});
+
+$("useFilterPointsBtn").addEventListener("click", ()=>{
+  const txt = $("filterAoiPoints")?.value?.trim();
+  if(!txt){ alert("Please paste filter points (lat,lon) first."); return; }
+  try{
+    const gj = parsePointsToPolygonGeoJSON(txt, "filter_points");
+    $("filterAoiText").value = JSON.stringify(gj, null, 2);
+    // draw on map
+    try{
+      if(state.drawnFilter) state.drawLayer?.removeLayer(state.drawnFilter);
+      const lyr = L.geoJSON(gj, {style:{color:"#ffe95a", weight:2, fillOpacity:0.05}});
+      lyr.eachLayer(l=>{ state.drawnFilter = l; state.drawLayer?.addLayer(l); });
+      try{ map.fitBounds(lyr.getBounds(), {padding:[20,20]}); }catch(e){}
+    }catch(e){}
+    applyFilterAoiFromText();
+  }catch(err){
+    alert("Invalid points list ❌ (need ≥3 points)");
+  }
+});
+    lyr.eachLayer(l=>{ state.drawnFilter = l; state.drawLayer?.addLayer(l); });
+  }catch(e){}
+  applyFilterAoiFromText();
+});
+
+// ---- Top filters (client-side, no recompute) ----
+$("minP").addEventListener("input", ()=>{
+  $("minPVal").textContent = `${$("minP").value}%`;
+  renderFromCache();
+});
+$("topLimit").addEventListener("change", ()=>renderFromCache());
 
 /* animation */
 $("playBtn").addEventListener("click", ()=>{
@@ -728,7 +1178,7 @@ function startPlay(){
 
     $("t0Select").selectedIndex = next0;
     $("t1Select").selectedIndex = next1;
-    await computeAndRender();
+    setDirty();
   };
 
   state.timer = setInterval(tick, 900);

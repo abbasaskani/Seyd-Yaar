@@ -49,6 +49,43 @@ Then open the printed local URL in your browser.
 
 ---
 
+## Credentials 🔐 (Copernicus username/password)
+
+Copernicus Marine credentials are **NOT stored inside any file in this repo** ✅
+
+The generator reads them from environment variables:
+
+```bash
+export COPERNICUS_MARINE_USERNAME="<your_user>"
+export COPERNICUS_MARINE_PASSWORD="<your_password>"
+```
+
+Where it is read:
+
+- `backend/seydyaar/pipeline/run_daily.py` → function `_try_copernicus_layers(...)`
+  - reads `os.getenv("COPERNICUS_MARINE_USERNAME")` and `os.getenv("COPERNICUS_MARINE_PASSWORD")`
+  - if missing, it logs an error in provider status and falls back to synthetic demo layers.
+
+---
+
+## AOI workflow (simple + flexible) 🗺️
+
+In the PWA (`docs/app.html`):
+
+- **AOI (Analysis area)**: limits the *computation + overlay + hotspot search* to your chosen region.
+- **AOI (Filter results after analysis)**: a second AOI applied *after* analysis to filter the displayed pixels and Top list.
+
+You can set each AOI via:
+
+1) Upload GeoJSON
+2) Paste GeoJSON text
+3) Enter BBOX (lat/lon min/max)
+4) Draw polygon/rectangle directly on the map (Leaflet‑Draw)
+
+Time resolution is fixed at **6 hours** in the UI (and the generator uses `step_hours=6` by default).
+
+---
+
 ## Repo layout
 
 - `docs/` — GitHub Pages static site (PWA)
@@ -61,3 +98,13 @@ Then open the printed local URL in your browser.
 
 Designed by: **عباس آسکانی — Abbas Askani**  
 **Askani Fishing Data company**
+
+
+## AOI input (inside the app)
+You can set the analysis area in 4 ways:
+- Upload GeoJSON
+- Paste GeoJSON text
+- BBOX (lat/lon min/max)
+- **Points list** (lat,lon per line) → builds a Polygon
+
+There is also a second AOI used only to **filter results after analysis** (same 4 input methods).
