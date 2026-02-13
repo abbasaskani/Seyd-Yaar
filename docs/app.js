@@ -438,7 +438,20 @@ function topKFromArray(arr, k=10){
 
 function renderTop10(list, covs){
   // covs optional: {sst, chl, current, waves, front}
+  const lim = Array.isArray(list) ? list.length : 0;
+  // Dynamic label: Top‑10 on map, up to N in table
+  if($("sumTop")){
+    const show = Math.min(lim, parseInt($("topLimit")?.value || "100", 10) || 100);
+    $("sumTop").textContent = (lang === "fa")
+      ? `نقاط برتر (روی نقشه: ۱۰ • جدول: ${show})`
+      : `Hotspots (Map: Top‑10 • Table: ${show})`;
+  }
+
   markerLayer.clearLayers();
+  if(!lim){
+    $("top10Table").innerHTML = `<div class="muted">${lang==="fa"?"هیچ نقطه‌ای با فیلتر فعلی پیدا نشد.":"No hotspots matched the current filter."}</div>`;
+    return;
+  }
   const rows = [];
   for(const pt of list){
     const showOnMap = (pt.rank<=10);
@@ -558,10 +571,7 @@ async function loadCovAtPoints(timeIso, points){
   const dy = (latMax - latMin) / (H-1);
 
   async function loadArr(key, dtype){
-    const url = `latest/${state.meta.paths.per_time[key]
-      .replace("{time}", timeId)
-      .replace("{species}", (state.species||"skipjack").toLowerCase())
-      .replace("{model}", (state.modelId||"ensemble").toLowerCase())}`;
+    const url = `latest/${state.runPath}/${state.meta.paths.per_time[key].replace("{time}", timeId)}`;
     return fetchBin(url, dtype);
   }
   const [sst, chl, cur, wav] = await Promise.all([
@@ -588,7 +598,7 @@ async function getConfAggregated(timeIsos){
   const W = state.grid.width, H = state.grid.height;
   const promises = timeIsos.map(t=>{
     const tid = timeIdFromIso(t);
-    const url = `latest/${state.meta.paths.per_time.conf.replace("{time}", tid)}`;
+    const url = `latest/${state.runPath}/${state.meta.paths.per_time.conf.replace("{time}", tid)}`;
     return fetchBin(url,"f32");
   });
   const arrs = await Promise.all(promises);
@@ -598,7 +608,7 @@ async function getConfAggregated(timeIsos){
   if(state.qcOn){
     const qcArrs = await Promise.all(timeIsos.map(async t=>{
       const tid = timeIdFromIso(t);
-      const url = `latest/${state.meta.paths.per_time.qc_chl.replace("{time}", tid)}`;
+      const url = `latest/${state.runPath}/${state.meta.paths.per_time.qc_chl.replace("{time}", tid)}`;
       return fetchBin(url,"u8");
     }));
     const qcMean = new Float32Array(conf.length);
@@ -687,7 +697,7 @@ async function computeAndRender(){
       console.warn("Missing layer template:", key);
       return new Float32Array(W*H).fill(NaN);
     }
-    const url = `latest/${tpl.replace("{time}", tid)}`;
+    const url = `latest/${state.runPath}/${tpl.replace("{time}", tid)}`;
     return fetchBin(url, (key.endsWith("_u8")?"u8":"f32"));
   }
 
@@ -729,51 +739,71 @@ async function computeAndRender(){
    Run/variant/species meta wiring
 ------------------------------ */
 async function refreshMeta(){
-  // Flat layout: latest/index.json + latest/meta.json (no runs/variants) ✅
-  state.index = await fetchJson("latest/index.json");
-  state.runPath = "";        // kept for backward-compat internal code
-  state.variant = "auto";    // cosmetic
-  state.runId = "main";      // cosmetic
-
-  // Hide run/variant (single) for commercial UI
-  const runRow = document.querySelector('.row.runRow') || document.getElementById("runRow");
-  const varRow = document.querySelector('.row.variantRow') || document.getElementById("variantRow");
-  if(runRow) runRow.style.display = "none";
-  if(varRow) varRow.style.display = "none";
-
-  // Load global web meta (paths + availability)
-  state.runMeta = await fetchJson("latest/meta.json");
-  state.meta = state.runMeta;
-
-  // Species list
-  const spSelect = $("speciesSelect");
-  spSelect.innerHTML = "";
-  const speciesList = (state.index.species && state.index.species.length) ? state.index.species : ["skipjack","yellowfin"];
-  for(const sp of speciesList){
+  // read meta_index to list runs
+  state.index = await fetchJson("latest/meta_index.json");
+  const runSelect = $("runSelect");
+  runSelect.innerHTML = "";
+  for(const r of state.index.runs){
     const opt = document.createElement("option");
-    opt.value = sp;
-    opt.textContent = sp[0].toUpperCase() + sp.slice(1);
-    spSelect.appendChild(opt);
+    opt.value = r.run_id;
+    opt.textContent = `${r.run_id} (${r.fast ? "fast" : "full"})`;
+    runSelect.appendChild(opt);
   }
-  if(!state.species) state.species = speciesList[0];
-  spSelect.value = state.species;
+  state.runId = state.index.latest_run_id || state.index.runs[state.index.runs.length-1]?.run_id;
+  runSelect.value = state.runId;
 
-  spSelect.addEventListener("change", async ()=>{
-    state.species = spSelect.value;
-    await refreshTimeSelectors();
+  runSelect.addEventListener("change", async ()=>{
+    state.runId = runSelect.value;
+    await refreshVariants();
   });
 
-  await refreshTimeSelectors();
+  await refreshVariants();
 }
 
 async function refreshVariants(){
-  // no-op in flat layout
-  return;
+  const run = state.index.runs.find(r=>r.run_id===state.runId);
+  state.runPath = run.path; // e.g., runs/demo_YYYY-MM-DD
+  const variantSelect = $("variantSelect");
+  variantSelect.innerHTML = "";
+  for(const v of run.variants){
+    const opt = document.createElement("option");
+    opt.value = v;
+    opt.textContent = v;
+    variantSelect.appendChild(opt);
+  }
+
+  // Keep gap toggle in sync with variant
+  const preferred = ($("gapToggle").checked) ? "gapfill" : "base";
+  state.variant = run.variants.includes(preferred) ? preferred : run.variants[0];
+  variantSelect.value = state.variant;
+
+  variantSelect.addEventListener("change", async ()=>{
+    state.variant = variantSelect.value;
+    $("gapToggle").checked = (state.variant === "gapfill");
+    await loadSpeciesMetaAndInit();
+  });
+
+  await loadSpeciesMetaAndInit();
 }
 
-async function refreshTimeSelectors(){
-  // Use latest/meta.json availability
-  const availableTimeIds = state.runMeta?.available_time_ids || state.index?.time_ids || [];
+async function loadSpeciesMetaAndInit(){
+  state.species = $("speciesSelect").value;
+  // species meta path:
+  const url = `latest/${state.runPath}/variants/${state.variant}/species/${state.species}/meta.json`;
+  state.meta = await fetchJson(url);
+  // run-level meta for availability reporting + deduped time catalog
+  state.runMeta = await fetchJson(`latest/${state.runPath}/meta.json`).catch(()=>null);
+  state.grid = state.meta.grid;
+
+  // load server mask
+  const maskUrl = `latest/${state.runPath}/${state.meta.paths.mask}`;
+  state.baseMask = await fetchBin(maskUrl, "u8");
+
+  // effective analysis mask = server mask × user AOI
+  state.analysisMask = combineMask(state.baseMask, state.userMask);
+
+  // time selects (prefer runMeta.available_time_ids to avoid listing missing future bins)
+  const availableTimeIds = state.runMeta?.available_time_ids || state.meta.time_ids || [];
   state.timeIds = availableTimeIds;
   state.times = availableTimeIds.map(timeIdToIso);
   state.isoToTimeId = {};
@@ -784,66 +814,117 @@ async function refreshTimeSelectors(){
   if($("availabilityInfo")){
     if(lastTid){
       const lastIso = timeIdToIso(lastTid);
-      $("availabilityInfo").innerHTML = `<b>${lang==="fa"?"آخرین داده":"Latest available data"}</b><br>${lastIso} (UTC)`;
+      $("availabilityInfo").innerHTML = `<b>${lang==="fa"?"آخرین دیتای موجود":"Latest available data"}</b><br><span class="muted">${fmtTime(lastIso)} (UTC)</span>`;
     }else{
-      $("availabilityInfo").textContent = (lang==="fa"?"دیتایی پیدا نشد":"No data found");
+      $("availabilityInfo").innerHTML = `<b>${lang==="fa"?"دیتایی یافت نشد":"No data found"}</b>`;
     }
   }
-
-  // Fill From/To selects
-  const fromSel = $("fromTime");
-  const toSel = $("toTime");
-  fromSel.innerHTML = "";
-  toSel.innerHTML = "";
+  $("t0Select").innerHTML = "";
+  $("t1Select").innerHTML = "";
   for(const t of state.times){
-    const o1=document.createElement("option"); o1.value=t; o1.textContent=t; fromSel.appendChild(o1);
-    const o2=document.createElement("option"); o2.value=t; o2.textContent=t; toSel.appendChild(o2);
+    const o0 = document.createElement("option");
+    o0.value = t; o0.textContent = fmtTime(t);
+    const o1 = document.createElement("option");
+    o1.value = t; o1.textContent = fmtTime(t);
+    $("t0Select").appendChild(o0);
+    $("t1Select").appendChild(o1);
   }
+  // default range: focus on the latest available window (commercial use‑case = planning ahead)
+  const last = Math.max(0, state.times.length-1);
+  $("t1Select").selectedIndex = last;
+  $("t0Select").selectedIndex = Math.max(0, last-2);
 
-  // default range
-  if(state.times.length){
-    fromSel.value = state.times[Math.max(0, state.times.length-2)];
-    toSel.value = state.times[state.times.length-1];
-    state.tFromIso = fromSel.value;
-    state.tToIso = toSel.value;
+  // defaults persisted
+  $("speciesSelect").value = state.species;
+  $("modelSelect").value = state.model;
+  $("mapSelect").value = state.map;
+  $("aggSelect").value = state.agg;
+
+  // Per‑species lookback memory (each species can have its own averaging window)
+  try{
+    const savedLb = localStorage.getItem(`lookback_${state.species}`);
+    if(savedLb !== null) $("lookbackSelect").value = savedLb;
+  }catch(_){/* ignore */}
+  applyLookback();
+
+
+  // AOI UI defaults (bbox = grid bounds)
+  $("bboxLatMin").value = state.grid.lat_min.toFixed(4);
+  $("bboxLatMax").value = state.grid.lat_max.toFixed(4);
+  $("bboxLonMin").value = state.grid.lon_min.toFixed(4);
+  $("bboxLonMax").value = state.grid.lon_max.toFixed(4);
+  // Don't erase user's AOI on species switch if it exists (AOI is a user intent)
+  if(!state.userMask){
+    state.userMask = null;
   }
+  state.analysisMask = combineMask(state.baseMask, state.userMask);
+  // init filter bbox defaults too
+  $("filterBboxLatMin").value = state.grid.lat_min.toFixed(4);
+  $("filterBboxLatMax").value = state.grid.lat_max.toFixed(4);
+  $("filterBboxLonMin").value = state.grid.lon_min.toFixed(4);
+  $("filterBboxLonMax").value = state.grid.lon_max.toFixed(4);
+  updateAoiStatus();
 
-  fromSel.onchange = ()=>{ state.tFromIso = fromSel.value; };
-  toSel.onchange = ()=>{ state.tToIso = toSel.value; };
+  // filter status
+  updateFilterAoiStatus();
 
-  // Ensure model select (kept)
-  await refreshModelSelect();
-}
+  // Leaflet draw layer + controls (once)
+  if(!state._drawInit){
+    state._drawInit = true;
+    // Two AOIs: analysis + filter
+    state.drawLayer = new L.FeatureGroup();
+    map.addLayer(state.drawLayer);
+    state.drawTarget = "analysis";
 
-async function refreshModelSelect(){
-  const modelSelect = $("modelSelect");
-  // keep existing options if already populated
-  if(!modelSelect.options.length){
-    ["Ensemble (default)"].forEach((t,i)=>{
-      const opt=document.createElement("option");
-      opt.value = "ensemble";
-      opt.textContent = t;
-      modelSelect.appendChild(opt);
+    // Keep last drawn shapes separated (for styling and status)
+    state.drawnAnalysis = null;
+    state.drawnFilter = null;
+
+    // Focus decides where draw goes
+    $("aoiText").addEventListener("focus", ()=> state.drawTarget = "analysis");
+    $("filterAoiText").addEventListener("focus", ()=> state.drawTarget = "filter");
+
+    const drawControl = new L.Control.Draw({
+      edit: { featureGroup: state.drawLayer },
+      draw: { polyline:false, circle:false, circlemarker:false, marker:false }
+    });
+    map.addControl(drawControl);
+
+    map.on(L.Draw.Event.CREATED, (e)=>{
+      // Style by target
+      if(state.drawTarget === "filter"){
+        if(state.drawnFilter) state.drawLayer.removeLayer(state.drawnFilter);
+        e.layer.setStyle?.({color:"#ffe95a", weight:2, fillOpacity:0.05});
+        state.drawnFilter = e.layer;
+        state.drawLayer.addLayer(e.layer);
+        const gj = e.layer.toGeoJSON();
+        $("filterAoiText").value = JSON.stringify(gj, null, 2);
+        applyFilterAoiFromText();
+      }else{
+        if(state.drawnAnalysis) state.drawLayer.removeLayer(state.drawnAnalysis);
+        e.layer.setStyle?.({color:"#39ff9f", weight:2, fillOpacity:0.05});
+        state.drawnAnalysis = e.layer;
+        state.drawLayer.addLayer(e.layer);
+        const gj = e.layer.toGeoJSON();
+        $("aoiText").value = JSON.stringify(gj, null, 2);
+        applyUserAoiFromText();
+      }
     });
   }
-  state.modelId = modelSelect.value || "ensemble";
-  modelSelect.onchange = ()=>{ state.modelId = modelSelect.value; };
+
+  renderProfile();
+  renderAudit();
+
+  // compute
+  setDirty();
 }
-
-
-async function loadSpeciesMetaAndInit(){
-  // Flat layout: global latest/meta.json already loaded ✅
-  state.species = $("speciesSelect")?.value || state.species || "skipjack";
-  state.meta = state.runMeta || state.meta;
-  await initMapAndUIFromMeta();
-}
-
 
 /* ------------------------------
    UI events
 ------------------------------ */
 ["speciesSelect","modelSelect","mapSelect","aggSelect","t0Select","t1Select"].forEach(id=>{
   $(id).addEventListener("change", async ()=>{
+    const prevSpecies = state.species;
     state.species = $("speciesSelect").value;
     state.model = $("modelSelect").value;
     state.map = $("mapSelect").value;
@@ -851,6 +932,8 @@ async function loadSpeciesMetaAndInit(){
 
     // if species changed, reload meta (different profile + files)
     if(id==="speciesSelect"){
+      // Persist per-species lookback (commercial UX: each species remembers its own average window)
+      try{ localStorage.setItem(`lookback_${prevSpecies}`, $("lookbackSelect").value); }catch(_){/* ignore */}
       await loadSpeciesMetaAndInit();
       setDirty("Species changed. Press Analyze.");
       return;
@@ -893,7 +976,11 @@ $("analyzeBtn").addEventListener("click", async ()=>{
   $("dirtyHint").textContent = (lang==="fa") ? "انجام شد ✅" : "Done ✅";
 });
 
-$("lookbackSelect").addEventListener("change", ()=>{ applyLookback(); setDirty("Lookback changed. Press Analyze."); });
+$("lookbackSelect").addEventListener("change", ()=>{
+  try{ localStorage.setItem(`lookback_${state.species}`, $("lookbackSelect").value); }catch(_){/* ignore */}
+  applyLookback();
+  setDirty("Lookback changed. Press Analyze.");
+});
 $("t1Select").addEventListener("change", ()=>{ applyLookback(); });
 function applyLookback(){
   const d = parseInt($("lookbackSelect").value||"0");
@@ -1270,5 +1357,7 @@ $("exportFbBtn").addEventListener("click", async ()=>{
 initMap();
 refreshMeta().catch(err=>{
   console.error(err);
-  alert("Failed to load demo data. Make sure you generated /docs/latest with the backend demo generator.");
+  toast(lang==="fa" ? "داده‌ای در مسیر /latest پیدا نشد. اگر هنوز خروجی تولید نکردی، Workflow GitHub Action را اجرا کن." : "No data found under /latest. If you haven't generated outputs yet, run the GitHub Action (Run generator) to create docs/latest.", "err", lang==="fa"?"خطا":"Error");
+  const hint = $("dirtyHint");
+  if(hint) hint.textContent = (lang==="fa") ? "داده موجود نیست — ابتدا خروجی بساز" : "No data — generate outputs first";
 });

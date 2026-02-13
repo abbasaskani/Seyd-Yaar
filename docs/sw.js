@@ -1,6 +1,6 @@
 /* Seyd‑Yaar Service Worker — cache static assets, but ALWAYS refresh dynamic data (latest/ + runs/) */
 
-const CACHE = "seydyaar-v0.3.0"; // bump this when you change SW
+const CACHE = "seydyaar-v0.3.1"; // bump this when you change SW
 
 // Only STATIC assets here. ❗Do NOT pre-cache latest/* or runs/*
 const CORE = [

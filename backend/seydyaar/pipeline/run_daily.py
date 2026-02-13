@@ -236,6 +236,70 @@ def _write_meta_index(out_root: Path, run_entry: Dict[str, Any]) -> None:
     minify_json_for_web(idx_path)
 
 
+def _write_latest_index_and_meta(out_root: Path, run_entry: Dict[str, Any], variant: str) -> None:
+    """Write tiny, stable endpoints under `docs/latest/`.
+
+    People often sanity-check these URLs in the browser:
+      - /latest/index.json
+      - /latest/meta.json
+
+    The app UI *still* relies on meta_index.json + runs/main/...; these files are
+    just a lightweight compatibility layer (and a nice UX for the landing page).
+    """
+    run_root = out_root / run_entry.get("path", "")
+    run_meta_path = run_root / "meta.json"
+    run_meta = None
+    if run_meta_path.exists():
+        try:
+            run_meta = json.loads(run_meta_path.read_text(encoding="utf-8"))
+        except Exception:
+            run_meta = None
+
+    time_ids = (run_meta or {}).get("available_time_ids") or []
+    latest_tid = (run_meta or {}).get("latest_available_time_id") or (time_ids[-1] if time_ids else None)
+
+    now_utc, _ = trusted_utc_now()
+    gen = now_utc.isoformat().replace("+00:00", "Z")
+
+    # /latest/index.json
+    index = {
+        "version": 1,
+        "schema": "seydyaar-latest-index-v1",
+        "generated_at_utc": gen,
+        "latest_run_id": run_entry.get("run_id"),
+        "run_path": run_entry.get("path"),
+        "variant_default": variant,
+        "species": run_entry.get("species", []),
+        "models": run_entry.get("models", []),
+        "time_count": len(time_ids),
+        "available_time_ids": time_ids,
+        "latest_available_time_id": latest_tid,
+        "notes": "Compatibility endpoint. Raw outputs live under runs/<run_id>/variants/...",
+    }
+    idx_out = out_root / "index.json"
+    write_json(idx_out, index)
+    minify_json_for_web(idx_out)
+
+    # /latest/meta.json (summary for UI)
+    meta = {
+        "version": 1,
+        "generated_at_utc": gen,
+        "run_id": run_entry.get("run_id"),
+        "variant": variant,
+        "time_source": (run_meta or {}).get("time_source"),
+        "latest_available_time_id": latest_tid,
+        "grid": (run_meta or {}).get("grid"),
+        "bbox": (run_meta or {}).get("bbox"),
+        "aoi": (run_meta or {}).get("aoi"),
+        "species": run_entry.get("species", []),
+        "models": run_entry.get("models", []),
+        "available_time_ids": time_ids,
+    }
+    meta_out = out_root / "meta.json"
+    write_json(meta_out, meta)
+    minify_json_for_web(meta_out)
+
+
 def run_daily(
     out_root: Path,
     aoi_geojson: dict,
@@ -486,13 +550,6 @@ def run_daily(
         "generated_at_utc": now_utc.isoformat().replace("+00:00", "Z"),
     }
     _write_meta_index(out_root, run_entry)
-
-    # -----------------------------
-    # FLATTEN for commercial UI (no runs/variants in docs/latest)
-    # -----------------------------
-    try:
-        _flatten_latest(out_root=out_root, run_id=run_id, variant=variant, species=list(species_profiles.keys()))
-    except Exception as e:
-        print("Flatten failed:", e)
-
+    # Also write /latest/index.json and /latest/meta.json compatibility endpoints.
+    _write_latest_index_and_meta(out_root, run_entry, variant)
     return run_id
