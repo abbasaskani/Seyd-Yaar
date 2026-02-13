@@ -322,6 +322,15 @@ function initMap(){
   setBase(0);
   markerLayer = L.layerGroup().addTo(map);
 
+  // ✅ IMPORTANT: Leaflet (and leaflet-draw) expects the map to have an initial
+  // center + zoom. If we don't set it, enabling draw/edit tools can throw:
+  // "Set map center and zoom first." (because map.getCenter() is called before load).
+  // We set a sane default center for the Arabian Sea, then we later fitBounds()
+  // after loading meta/grid.
+  try{
+    map.setView([12.0, 54.0], 5);
+  }catch(_){/* ignore */}
+
   map.on("click", (e)=>{
     if(!e?.latlng) return;
     $("fbLat").value = e.latlng.lat.toFixed(4);
@@ -916,44 +925,47 @@ async function loadSpeciesMetaAndInit(){
   // Leaflet draw layer + controls (once)
   if(!state._drawInit){
     state._drawInit = true;
-    // Two AOIs: analysis + filter
-    state.drawLayer = new L.FeatureGroup();
-    map.addLayer(state.drawLayer);
-    state.drawTarget = "analysis";
+    // Leaflet-draw calls map.getCenter() internally; make sure map is ready.
+    map.whenReady(()=>{
+      // Two AOIs: analysis + filter
+      state.drawLayer = new L.FeatureGroup();
+      map.addLayer(state.drawLayer);
+      state.drawTarget = "analysis";
 
-    // Keep last drawn shapes separated (for styling and status)
-    state.drawnAnalysis = null;
-    state.drawnFilter = null;
+      // Keep last drawn shapes separated (for styling and status)
+      state.drawnAnalysis = null;
+      state.drawnFilter = null;
 
-    // Focus decides where draw goes
-    $("aoiText").addEventListener("focus", ()=> state.drawTarget = "analysis");
-    $("filterAoiText").addEventListener("focus", ()=> state.drawTarget = "filter");
+      // Focus decides where draw goes
+      $("aoiText").addEventListener("focus", ()=> state.drawTarget = "analysis");
+      $("filterAoiText").addEventListener("focus", ()=> state.drawTarget = "filter");
 
-    const drawControl = new L.Control.Draw({
-      edit: { featureGroup: state.drawLayer },
-      draw: { polyline:false, circle:false, circlemarker:false, marker:false }
-    });
-    map.addControl(drawControl);
+      const drawControl = new L.Control.Draw({
+        edit: { featureGroup: state.drawLayer },
+        draw: { polyline:false, circle:false, circlemarker:false, marker:false }
+      });
+      map.addControl(drawControl);
 
-    map.on(L.Draw.Event.CREATED, (e)=>{
-      // Style by target
-      if(state.drawTarget === "filter"){
-        if(state.drawnFilter) state.drawLayer.removeLayer(state.drawnFilter);
-        e.layer.setStyle?.({color:"#ffe95a", weight:2, fillOpacity:0.05});
-        state.drawnFilter = e.layer;
-        state.drawLayer.addLayer(e.layer);
-        const gj = e.layer.toGeoJSON();
-        $("filterAoiText").value = JSON.stringify(gj, null, 2);
-        applyFilterAoiFromText();
-      }else{
-        if(state.drawnAnalysis) state.drawLayer.removeLayer(state.drawnAnalysis);
-        e.layer.setStyle?.({color:"#39ff9f", weight:2, fillOpacity:0.05});
-        state.drawnAnalysis = e.layer;
-        state.drawLayer.addLayer(e.layer);
-        const gj = e.layer.toGeoJSON();
-        $("aoiText").value = JSON.stringify(gj, null, 2);
-        applyUserAoiFromText();
-      }
+      map.on(L.Draw.Event.CREATED, (e)=>{
+        // Style by target
+        if(state.drawTarget === "filter"){
+          if(state.drawnFilter) state.drawLayer.removeLayer(state.drawnFilter);
+          e.layer.setStyle?.({color:"#ffe95a", weight:2, fillOpacity:0.05});
+          state.drawnFilter = e.layer;
+          state.drawLayer.addLayer(e.layer);
+          const gj = e.layer.toGeoJSON();
+          $("filterAoiText").value = JSON.stringify(gj, null, 2);
+          applyFilterAoiFromText();
+        }else{
+          if(state.drawnAnalysis) state.drawLayer.removeLayer(state.drawnAnalysis);
+          e.layer.setStyle?.({color:"#39ff9f", weight:2, fillOpacity:0.05});
+          state.drawnAnalysis = e.layer;
+          state.drawLayer.addLayer(e.layer);
+          const gj = e.layer.toGeoJSON();
+          $("aoiText").value = JSON.stringify(gj, null, 2);
+          applyUserAoiFromText();
+        }
+      });
     });
   }
 
