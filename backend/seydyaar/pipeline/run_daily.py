@@ -486,4 +486,13 @@ def run_daily(
         "generated_at_utc": now_utc.isoformat().replace("+00:00", "Z"),
     }
     _write_meta_index(out_root, run_entry)
+
+    # -----------------------------
+    # FLATTEN for commercial UI (no runs/variants in docs/latest)
+    # -----------------------------
+    try:
+        _flatten_latest(out_root=out_root, run_id=run_id, variant=variant, species=list(species_profiles.keys()))
+    except Exception as e:
+        print("Flatten failed:", e)
+
     return run_id
