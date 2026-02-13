@@ -1,1 +1,1 @@
-{"version":1,"latest_run_id":"main","runs":[{"run_id":"main","path":"runs/main","fast":false,"date":"2026-02-13","time_count":52,"variants":["auto"],"species":["skipjack","yellowfin"],"generated_at_utc":"2026-02-13T16:36:19.550683Z"}],"generated_at_utc":"2026-02-13T16:36:23.306561Z","notes":"Placeholder. Outputs will appear here after running the GitHub Action."}
+{"version": 1, "latest_run_id": null, "runs": [], "generated_at_utc": "2026-02-13T13:00:11Z", "notes": "Placeholder. Outputs will appear here after running the GitHub Action."}

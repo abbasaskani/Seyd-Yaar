@@ -1,5 +1,8 @@
 let deferredPrompt = null;
 
+const $ = (id) => document.getElementById(id);
+const safeText = (id, txt) => { const el = $(id); if (el) el.textContent = txt; };
+
 const strings = {
   en: {
     h1: "Habitat × Operations → Catch Probability 🐟🌊",
@@ -20,11 +23,11 @@ const strings = {
 let lang = localStorage.getItem("lang") || "en";
 function applyLang(){
   const t = strings[lang];
-  document.getElementById("h1").textContent = t.h1;
-  document.getElementById("p1").textContent = t.p1;
-  document.getElementById("launchBtn").textContent = t.launch;
-  document.getElementById("installBtn").textContent = t.install;
-  document.getElementById("prevTitle").textContent = t.prevTitle;
+  safeText("h1", t.h1);
+  safeText("p1", t.p1);
+  safeText("launchBtn", t.launch);
+  safeText("installBtn", t.install);
+  safeText("prevTitle", t.prevTitle);
   document.body.dir = (lang === "fa") ? "rtl" : "ltr";
 }
 

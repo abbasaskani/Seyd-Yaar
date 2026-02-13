@@ -1,5 +1,7 @@
 /* Seyd‑Yaar app.js — dynamic map + aggregation + uncertainty + feedback 💠🌊 */
 const $ = (id) => document.getElementById(id);
+const safeText = (id, txt) => { const el = $(id); if (el) el.textContent = txt; };
+const safeHTML = (id, html) => { const el = $(id); if (el) el.innerHTML = html; };
 
 const strings = {
   en: {
@@ -55,28 +57,28 @@ const strings = {
 let lang = localStorage.getItem("lang") || "en";
 function applyLang(){
   const t = strings[lang];
-  $("subtitle").textContent = t.subtitle;
-  $("lblRun").textContent = t.Run;
-  $("lblVariant").textContent = t.Variant;
-  $("lblSpecies").textContent = t.Species;
-  $("lblModel").textContent = t.Model;
-  $("lblMap").textContent = t.Map;
-  $("lblAgg").textContent = t.Aggregation;
-  $("lblFrom").textContent = t.From;
-  $("lblTo").textContent = t.To;
-  $("sumTop").textContent = t.Top;
-  $("sumProfile").textContent = t.Profile;
-  $("sumAudit").textContent = t.Audit;
-  $("downloadPngBtn").textContent = t.DownloadPNG;
-  $("downloadGeoBtn").textContent = t.DownloadGeo;
-  $("feedbackBtn").textContent = t.Feedback;
-  $("exportFbBtn").textContent = t.ExportFb;
-  $("fbLblRating").textContent = t.Rating;
-  $("fbLblDepth").textContent = t.Depth;
-  $("fbLblNotes").textContent = t.Notes;
-  $("saveFbBtn").textContent = t.SaveLocal;
-  $("qcHint").textContent = t.qcHint;
-  $("gapHint").textContent = t.gapHint;
+  safeText("subtitle", t.subtitle);
+  safeText("lblRun", t.Run);
+  safeText("lblVariant", t.Variant);
+  safeText("lblSpecies", t.Species);
+  safeText("lblModel", t.Model);
+  safeText("lblMap", t.Map);
+  safeText("lblAgg", t.Aggregation);
+  safeText("lblFrom", t.From);
+  safeText("lblTo", t.To);
+  safeText("sumTop", t.Top);
+  safeText("sumProfile", t.Profile);
+  safeText("sumAudit", t.Audit);
+  safeText("downloadPngBtn", t.DownloadPNG);
+  safeText("downloadGeoBtn", t.DownloadGeo);
+  safeText("feedbackBtn", t.Feedback);
+  safeText("exportFbBtn", t.ExportFb);
+  safeText("fbLblRating", t.Rating);
+  safeText("fbLblDepth", t.Depth);
+  safeText("fbLblNotes", t.Notes);
+  safeText("saveFbBtn", t.SaveLocal);
+  safeText("qcHint", t.qcHint);
+  safeText("gapHint", t.gapHint);
   document.body.dir = (lang === "fa") ? "rtl" : "ltr";
 }
 $("langToggle").addEventListener("click", ()=>{
@@ -119,6 +121,8 @@ function toast(message, kind="ok", title=""){
 const panel = $("panel");
 $("sheetHandle")?.addEventListener("click", ()=>{
   panel?.classList.toggle("open");
+  // Leaflet sometimes needs a resize tick after layout changes
+  if(map) setTimeout(()=>map.invalidateSize(true), 80);
 });
 
 /* ------------------------------
@@ -271,10 +275,51 @@ function combineMask(base, extra){
 let map, imageOverlay, markerLayer;
 function initMap(){
   map = L.map('map', {preferCanvas:true});
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    maxZoom: 12,
-    attribution: '&copy; OpenStreetMap'
-  }).addTo(map);
+  // 🗺️ Basemap with automatic fallback
+  // In some networks/regions the default OSM tile endpoint may be blocked or rate-limited.
+  // If we detect repeated tile errors, we automatically switch to a mirror.
+  const basemaps = [
+    {
+      name: "OSM",
+      url: "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+      opts: { subdomains: "abc", maxZoom: 18, attribution: "&copy; OpenStreetMap" }
+    },
+    {
+      name: "Carto",
+      url: "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
+      opts: { subdomains: "abcd", maxZoom: 19, attribution: "&copy; CARTO" }
+    },
+    {
+      name: "Esri",
+      url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+      opts: { maxZoom: 19, attribution: "Tiles &copy; Esri" }
+    }
+  ];
+
+  let baseIdx = 0;
+  let tileErrors = 0;
+  let baseLayer = null;
+
+  function setBase(i){
+    baseIdx = i % basemaps.length;
+    tileErrors = 0;
+    if(baseLayer) map.removeLayer(baseLayer);
+    const bm = basemaps[baseIdx];
+    baseLayer = L.tileLayer(bm.url, {
+      ...bm.opts,
+      // allow images to load cross-origin without tainting (helps PNG export in some browsers)
+      crossOrigin: true,
+    }).addTo(map);
+    baseLayer.on("tileerror", ()=>{
+      tileErrors++;
+      // If too many tile errors early on, fallback.
+      if(tileErrors === 8){
+        console.warn("Basemap tile errors; switching basemap to", basemaps[(baseIdx+1)%basemaps.length].name);
+        setBase(baseIdx+1);
+      }
+    });
+  }
+  setBase(0);
   markerLayer = L.layerGroup().addTo(map);
 
   map.on("click", (e)=>{
@@ -442,9 +487,9 @@ function renderTop10(list, covs){
   // Dynamic label: Top‑10 on map, up to N in table
   if($("sumTop")){
     const show = Math.min(lim, parseInt($("topLimit")?.value || "100", 10) || 100);
-    $("sumTop").textContent = (lang === "fa")
+    safeText("sumTop", (lang === "fa")
       ? `نقاط برتر (روی نقشه: ۱۰ • جدول: ${show})`
-      : `Hotspots (Map: Top‑10 • Table: ${show})`;
+      : `Hotspots (Map: Top‑10 • Table: ${show})`);
   }
 
   markerLayer.clearLayers();
@@ -527,8 +572,8 @@ function renderProfile(){
 
 function renderAudit(){
   const meta = state.meta;
-  if(!meta){ $("auditBox").textContent="—"; return; }
-  $("auditBox").textContent = JSON.stringify({
+  if(!meta){ safeText("auditBox", "—"); return; }
+  safeText("auditBox", JSON.stringify({
     run_id: meta.run_id,
     variant: meta.variant,
     species: meta.species,
@@ -536,7 +581,7 @@ function renderAudit(){
     ppp_model: meta.ppp_model,
     grid: meta.grid,
     times: meta.times?.length,
-  }, null, 2);
+  }, null, 2));
 }
 
 /* ------------------------------
@@ -963,17 +1008,17 @@ $("gapToggle").addEventListener("change", async ()=>{
 
 $("analyzeBtn").addEventListener("click", async ()=>{
   state.dirty = false;
-  $("dirtyHint").textContent = (lang==="fa") ? "در حال تحلیل..." : "Analyzing…";
+  safeText("dirtyHint", (lang==="fa") ? "در حال تحلیل..." : "Analyzing…");
   $("top10Table").innerHTML = `<div class="skeleton" style="height:180px"></div>`;
   toast(lang==="fa" ? "در حال بارگذاری داده‌ها" : "Loading data…", "ok", lang==="fa"?"تحلیل":"Analyze");
   try{ await computeAndRender(); }
   catch(err){
     console.error(err);
     toast(lang==="fa" ? "داده برای این بازه هنوز آماده نیست. اگر تحلیل در حال اجراست، کمی بعد دوباره امتحان کن." : "Data not available for this selection yet. If a backend run is in progress, try again later.", "warn", lang==="fa"?"در دسترس نیست":"Not ready");
-    $("dirtyHint").textContent = (lang==="fa") ? "داده هنوز آماده نیست" : "Not ready yet";
+    safeText("dirtyHint", (lang==="fa") ? "داده هنوز آماده نیست" : "Not ready yet");
     return;
   }
-  $("dirtyHint").textContent = (lang==="fa") ? "انجام شد ✅" : "Done ✅";
+  safeText("dirtyHint", (lang==="fa") ? "انجام شد ✅" : "Done ✅");
 });
 
 $("lookbackSelect").addEventListener("change", ()=>{
@@ -1002,7 +1047,7 @@ function applyLookback(){
 
 function setDirty(msg){
   state.dirty = true;
-  $("dirtyHint").textContent = msg || "Change settings, then press Analyze.";
+  safeText("dirtyHint", msg || "Change settings, then press Analyze.");
 }
 
 function parsePointsToPolygonGeoJSON(txt, name="points_poly"){
@@ -1027,7 +1072,7 @@ function parsePointsToPolygonGeoJSON(txt, name="points_poly"){
 
 function updateAoiStatus(){
   const on = !!state.userMask;
-  $("aoiStatus").textContent = on ? "AOI: active ✅ (mask applied)" : "AOI: none (using server mask)";
+  safeText("aoiStatus", on ? "AOI: active ✅ (mask applied)" : "AOI: none (using server mask)");
 }
 function applyUserAoiFromText(){
   try{
@@ -1100,7 +1145,7 @@ $("usePointsBtn").addEventListener("click", ()=>{
 // ---- Filter AOI (post-analysis) ----
 function updateFilterAoiStatus(){
   const on = !!state.filterMask;
-  $("filterAoiStatus").textContent = on ? "Filter: active ✅" : "Filter: none";
+  safeText("filterAoiStatus", on ? "Filter: active ✅" : "Filter: none");
 }
 function applyFilterAoiFromText(){
   try{
@@ -1169,7 +1214,7 @@ $("useFilterPointsBtn").addEventListener("click", ()=>{
 
 // ---- Top filters (client-side, no recompute) ----
 $("minP").addEventListener("input", ()=>{
-  $("minPVal").textContent = `${$("minP").value}%`;
+  safeText("minPVal", `${$("minP").value}%`);
   renderFromCache();
 });
 $("topLimit").addEventListener("change", ()=>renderFromCache());
@@ -1184,7 +1229,7 @@ $("playBtn").addEventListener("click", ()=>{
 });
 function startPlay(){
   state.playing = true;
-  $("playBtn").textContent = "⏸ Pause";
+  safeText("playBtn", "⏸ Pause");
 
   // Keep the selected range length fixed, and slide it forward
   const rangeLen = Math.abs($("t1Select").selectedIndex - $("t0Select").selectedIndex);
@@ -1212,7 +1257,7 @@ function startPlay(){
 }
 function stopPlay(){
   state.playing = false;
-  $("playBtn").textContent = "▶ Play";
+  safeText("playBtn", "▶ Play");
   if(state.timer) clearInterval(state.timer);
   state.timer = null;
 }
@@ -1300,7 +1345,7 @@ let lastFbTs = 0;
 $("saveFbBtn").addEventListener("click", async ()=>{
   const now = Date.now();
   if(now - lastFbTs < 5000){
-    $("fbHint").textContent = "Rate limit: please wait a few seconds 🙏";
+    safeText("fbHint", "Rate limit: please wait a few seconds 🙏");
     return;
   }
   const rating = $("fbRating").value;
@@ -1311,11 +1356,11 @@ $("saveFbBtn").addEventListener("click", async ()=>{
 
   // validation
   if(!Number.isFinite(lat) || !Number.isFinite(lon)){
-    $("fbHint").textContent = "Please set lat/lon (click on map) ✅";
+    safeText("fbHint", "Please set lat/lon (click on map) ✅");
     return;
   }
   if(lat < state.grid.lat_min-2 || lat > state.grid.lat_max+2 || lon < state.grid.lon_min-2 || lon > state.grid.lon_max+2){
-    $("fbHint").textContent = "Lat/Lon outside AOI bounds ⚠️";
+    safeText("fbHint", "Lat/Lon outside AOI bounds ⚠️");
     return;
   }
 
@@ -1333,8 +1378,8 @@ $("saveFbBtn").addEventListener("click", async ()=>{
   };
   await saveFeedback(rec);
   lastFbTs = now;
-  $("fbHint").textContent = "Saved locally ✅ (IndexedDB)";
-  setTimeout(()=>{$("fbHint").textContent = "Saved to IndexedDB. Anti‑spam: rate‑limit + basic validation.";}, 2200);
+  safeText("fbHint", "Saved locally ✅ (IndexedDB)");
+  setTimeout(()=>{safeText("fbHint", "Saved to IndexedDB. Anti‑spam: rate‑limit + basic validation.");}, 2200);
   closeModal();
 });
 
@@ -1355,6 +1400,8 @@ $("exportFbBtn").addEventListener("click", async ()=>{
    Bootstrap
 ------------------------------ */
 initMap();
+// Ensure tiles render even if the layout/CSS loads slightly later
+setTimeout(()=>{ try{ map?.invalidateSize(true); }catch(_){} }, 120);
 refreshMeta().catch(err=>{
   console.error(err);
   toast(lang==="fa" ? "داده‌ای در مسیر /latest پیدا نشد. اگر هنوز خروجی تولید نکردی، Workflow GitHub Action را اجرا کن." : "No data found under /latest. If you haven't generated outputs yet, run the GitHub Action (Run generator) to create docs/latest.", "err", lang==="fa"?"خطا":"Error");
