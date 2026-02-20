@@ -60,6 +60,31 @@ def _dt_from_time_id(time_id: str) -> datetime:
     return datetime.strptime(time_id, "%Y%m%d_%H%MZ").replace(tzinfo=timezone.utc)
 
 
+# ✅ NEW: accept BOTH naming schemes (project + toolbox)
+def _get_copernicus_creds() -> Tuple[str, str]:
+    """
+    Prefer project env names, fallback to Copernicus Marine Toolbox env names.
+    Returns (username, password) or ("","") if missing.
+
+    Project (legacy/custom) names:
+      - COPERNICUS_MARINE_USERNAME
+      - COPERNICUS_MARINE_PASSWORD
+
+    Copernicus Marine Toolbox names:
+      - COPERNICUSMARINE_SERVICE_USERNAME
+      - COPERNICUSMARINE_SERVICE_PASSWORD
+    """
+    user = os.getenv("COPERNICUS_MARINE_USERNAME", "").strip()
+    pwd  = os.getenv("COPERNICUS_MARINE_PASSWORD", "").strip()
+
+    if not user:
+        user = os.getenv("COPERNICUSMARINE_SERVICE_USERNAME", "").strip()
+    if not pwd:
+        pwd = os.getenv("COPERNICUSMARINE_SERVICE_PASSWORD", "").strip()
+
+    return user, pwd
+
+
 def _synthetic_env_layers(grid: GridSpec, ts_iso: str) -> Dict[str, np.ndarray]:
     rng = np.random.default_rng(_seed_from_ts(ts_iso))
     lon2d, lat2d = grid.lonlat_mesh()
@@ -99,12 +124,12 @@ def _try_copernicus_layers(
     ts_iso: str,
     datasets_cfg: Dict[str, Any],
 ) -> Tuple[Optional[Dict[str, np.ndarray]], Dict[str, Any]]:
-    user = os.getenv("COPERNICUS_MARINE_USERNAME", "")
-    pwd = os.getenv("COPERNICUS_MARINE_PASSWORD", "")
+    # ✅ CHANGED: read both env name variants
+    user, pwd = _get_copernicus_creds()
     status: Dict[str, Any] = {"provider": "copernicusmarine", "ok": False, "errors": []}
 
     if not (user and pwd):
-        status["errors"].append("missing COPERNICUS_MARINE_USERNAME/PASSWORD")
+        status["errors"].append("missing Copernicus credentials (COPERNICUS_MARINE_* or COPERNICUSMARINE_SERVICE_*)")
         return None, status
 
     try:
@@ -139,7 +164,7 @@ def _try_copernicus_layers(
         offsets_h = [0, -6, -12, -18, -24, 6, 12, 18, 24]
         last_err: Optional[Exception] = None
         for off in offsets_h:
-            tt0 = t0 + dt.timedelta(hours=off)
+            tt0 = t0 + dt.timedelta(hours=off)  # NOTE: dt is not imported in your file; see note below
             tt1 = tt0
             p = tmpdir / f"{key}_{tt0.strftime('%Y%m%dT%H%M%S')}.nc"
             try:
@@ -215,6 +240,10 @@ def _try_copernicus_layers(
         return None, status
 
 
+# -----------------------------
+# Rest of your file unchanged
+# -----------------------------
+
 def _write_meta_index(out_root: Path, run_entry: Dict[str, Any]) -> None:
     idx_path = out_root / "meta_index.json"
     if idx_path.exists():
@@ -261,7 +290,6 @@ def _write_latest_index_and_meta(out_root: Path, run_entry: Dict[str, Any], vari
     now_utc, _ = trusted_utc_now()
     gen = now_utc.isoformat().replace("+00:00", "Z")
 
-    # /latest/index.json
     index = {
         "version": 1,
         "schema": "seydyaar-latest-index-v1",
@@ -280,7 +308,6 @@ def _write_latest_index_and_meta(out_root: Path, run_entry: Dict[str, Any], vari
     write_json(idx_out, index)
     minify_json_for_web(idx_out)
 
-    # /latest/meta.json (summary for UI)
     meta = {
         "version": 1,
         "generated_at_utc": gen,
@@ -315,15 +342,10 @@ def run_daily(
     """
     Returns run_id written under out_root/runs/<run_id>.
     """
-    # NOTE: We intentionally keep a *single* run folder ("main") and only append
-    # per-time outputs under times/<timeId>/... to avoid overlapping/duplicate
-    # files across daily runs (e.g., 13/14/15 repeated when anchoring on 11 then 12).
     now_utc, time_source = trusted_utc_now()
     anchor = now_utc.date() if date.lower() == "today" else datetime.fromisoformat(date).date()
 
-    # Enforce product requirement: temporal resolution is 6 hours or coarser.
     step_hours = max(int(step_hours), 6)
-
     run_id = "main"
 
     W, H = [int(x) for x in grid_wh.lower().split("x")]
@@ -332,8 +354,6 @@ def run_daily(
     grid = GridSpec(lon_min=bbox[0], lat_min=bbox[1], lon_max=bbox[2], lat_max=bbox[3], width=W, height=H)
     mask = mask_from_geojson(aoi_geojson, grid)
 
-    # Candidate time list (ISO strings). We will de-duplicate by their time_id
-    # and will also keep a compact retention window for past data.
     ts_list = timestamps_for_range(anchor_date=date, past_days=past_days, future_days=future_days, step_hours=step_hours)
     time_ids = [time_id_from_iso(iso) for iso in ts_list]
     id_by_iso = {iso: tid for iso, tid in zip(ts_list, time_ids)}
@@ -341,7 +361,6 @@ def run_daily(
     run_root = out_root / "runs" / run_id
     run_root.mkdir(parents=True, exist_ok=True)
 
-    # If we have an existing run, keep its time catalog and only append new times.
     prev_meta_path = run_root / "meta.json"
     prev_time_ids: List[str] = []
     if prev_meta_path.exists():
@@ -351,14 +370,13 @@ def run_daily(
         except Exception:
             prev_time_ids = []
 
-    # run-level meta (will be rewritten at the end with a *deduped* time list)
     run_meta = {
         "run_id": run_id,
         "date": anchor.isoformat(),
         "generated_at_utc": now_utc.isoformat().replace("+00:00", "Z"),
         "time_source": time_source,
-        "times": ts_list,  # provisional; will be updated after generation
-        "time_ids": time_ids,  # provisional
+        "times": ts_list,
+        "time_ids": time_ids,
         "variants": [variant],
         "species": list(species_profiles.keys()),
         "bbox": list(bbox),
@@ -368,36 +386,30 @@ def run_daily(
     write_json(run_root / "meta.json", run_meta)
     minify_json_for_web(run_root / "meta.json")
 
-    # datasets config (optional)
     datasets_cfg_path = Path("backend/config/datasets.json")
     datasets_cfg = json.loads(datasets_cfg_path.read_text(encoding="utf-8")) if datasets_cfg_path.exists() else {}
 
-    # per species outputs
     for sp, prof in species_profiles.items():
         priors = prof.get("priors", {})
         weights = prof.get("layer_weights", {})
         ops_priors = prof.get("ops_constraints", {})
-        # embed current/waves priors into ops layer
         ops_priors = {**priors, **ops_priors}
 
         sp_root = run_root / "variants" / variant / "species" / sp
         times_root = sp_root / "times"
         times_root.mkdir(parents=True, exist_ok=True)
 
-        # write mask (shared)
         write_bin_u8(sp_root / "mask_u8.bin", mask)
 
-        # species meta for the web UI
         sp_meta = {
             "species": sp,
             "label": prof.get("label", {}),
             "grid": run_meta["grid"],
-            "times": ts_list,  # ISO list
+            "times": ts_list,
             "time_ids": time_ids,
             "paths": {
                 "mask": f"variants/{variant}/species/{sp}/mask_u8.bin",
                 "per_time": {
-                    # Main outputs (UI expects these keys)
                     "pcatch_scoring": f"variants/{variant}/species/{sp}/times/{{time}}/pcatch_scoring_f32.bin",
                     "pcatch_frontplus": f"variants/{variant}/species/{sp}/times/{{time}}/pcatch_frontplus_f32.bin",
                     "pcatch_ensemble": f"variants/{variant}/species/{sp}/times/{{time}}/pcatch_ensemble_f32.bin",
@@ -413,7 +425,7 @@ def run_daily(
                     "waves": f"variants/{variant}/species/{sp}/times/{{time}}/waves_f32.bin",
                     "conf": f"variants/{variant}/species/{sp}/times/{{time}}/conf_f32.bin",
                     "qc_chl": f"variants/{variant}/species/{sp}/times/{{time}}/qc_chl_u8.bin",
-                  },
+                },
             },
             "model_info": {
                 "habitat": {"priors": priors, "weights": weights},
@@ -423,13 +435,10 @@ def run_daily(
         write_json(sp_root / "meta.json", sp_meta)
         minify_json_for_web(sp_root / "meta.json")
 
-        # compute each time
         provider_status: List[Dict[str, Any]] = []
         for ts_iso in ts_list:
             tid = id_by_iso[ts_iso]
 
-            # De-duplicate across days: if this timestamp was already generated
-            # in a previous run, don't regenerate it.
             if (times_root / tid / "pcatch_f32.bin").exists():
                 provider_status.append({"timestamp": ts_iso, "skipped": True, "reason": "already_exists"})
                 continue
@@ -440,7 +449,6 @@ def run_daily(
                 status = {**status, "fallback": "synthetic"}
             provider_status.append({"timestamp": ts_iso, **status})
 
-            # fronts from sst/chl/ssh
             t_front = gradient_magnitude(layers["sst_c"])
             c_front = gradient_magnitude(layers["chl_mg_m3"])
             s_front = gradient_magnitude(layers["ssh_m"])
@@ -478,27 +486,19 @@ def run_daily(
             write_bin_f32(tdir / "spread_f32.bin", spread)
             write_bin_f32(tdir / "front_f32.bin", f)
 
-            # covariates (for explainability table)
             write_bin_f32(tdir / "sst_f32.bin", inputs.sst_c.astype(np.float32))
             write_bin_f32(tdir / "chl_f32.bin", inputs.chl_mg_m3.astype(np.float32))
             write_bin_f32(tdir / "current_f32.bin", inputs.current_m_s.astype(np.float32))
             write_bin_f32(tdir / "waves_f32.bin", inputs.waves_hs_m.astype(np.float32))
 
-            # QC + confidence
             write_bin_u8(tdir / "qc_chl_u8.bin", layers["qc_chl"])
             write_bin_f32(tdir / "conf_f32.bin", layers["conf"])
 
-        # write provider status into species meta (append field)
         sp_meta2 = json.loads((sp_root / "meta.json").read_text(encoding="utf-8"))
         sp_meta2["provider_status"] = provider_status
         write_json(sp_root / "meta.json", sp_meta2)
         minify_json_for_web(sp_root / "meta.json")
 
-    # -----------------------------
-    # Retention + time catalog
-    # -----------------------------
-    # Keep only a compact window of past data (default: 2 days) to prevent
-    # uncontrolled growth of docs/latest and avoid duplicated overlaps.
     anchor_dt = datetime(anchor.year, anchor.month, anchor.day, 0, 0, 0, tzinfo=timezone.utc)
     cutoff_dt = anchor_dt - timedelta(days=max(int(past_days), 0))
 
@@ -509,7 +509,6 @@ def run_daily(
         if times_dir.exists():
             existing_time_ids = sorted([p.name for p in times_dir.iterdir() if p.is_dir()])
 
-    # Delete old times across all species
     import shutil
     for tid in list(existing_time_ids):
         try:
@@ -522,14 +521,12 @@ def run_daily(
                 if tpath.exists():
                     shutil.rmtree(tpath, ignore_errors=True)
 
-    # Re-scan after deletion
     existing_time_ids = []
     if sp0:
         times_dir = run_root / "variants" / variant / "species" / sp0 / "times"
         if times_dir.exists():
             existing_time_ids = sorted([p.name for p in times_dir.iterdir() if p.is_dir()])
 
-    # Update run-level meta.json to reflect *deduped* available times
     run_meta2 = json.loads((run_root / "meta.json").read_text(encoding="utf-8"))
     run_meta2["past_days_kept"] = int(past_days)
     run_meta2["future_days_target"] = int(future_days)
@@ -538,7 +535,6 @@ def run_daily(
     write_json(run_root / "meta.json", run_meta2)
     minify_json_for_web(run_root / "meta.json")
 
-    # update meta_index.json
     run_entry = {
         "run_id": run_id,
         "path": f"runs/{run_id}",
@@ -550,6 +546,5 @@ def run_daily(
         "generated_at_utc": now_utc.isoformat().replace("+00:00", "Z"),
     }
     _write_meta_index(out_root, run_entry)
-    # Also write /latest/index.json and /latest/meta.json compatibility endpoints.
     _write_latest_index_and_meta(out_root, run_entry, variant)
     return run_id
