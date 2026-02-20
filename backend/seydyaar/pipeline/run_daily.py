@@ -60,7 +60,6 @@ def _dt_from_time_id(time_id: str) -> datetime:
     return datetime.strptime(time_id, "%Y%m%d_%H%MZ").replace(tzinfo=timezone.utc)
 
 
-# ✅ NEW: accept BOTH naming schemes (project + toolbox)
 def _get_copernicus_creds() -> Tuple[str, str]:
     """
     Prefer project env names, fallback to Copernicus Marine Toolbox env names.
@@ -75,7 +74,7 @@ def _get_copernicus_creds() -> Tuple[str, str]:
       - COPERNICUSMARINE_SERVICE_PASSWORD
     """
     user = os.getenv("COPERNICUS_MARINE_USERNAME", "").strip()
-    pwd  = os.getenv("COPERNICUS_MARINE_PASSWORD", "").strip()
+    pwd = os.getenv("COPERNICUS_MARINE_PASSWORD", "").strip()
 
     if not user:
         user = os.getenv("COPERNICUSMARINE_SERVICE_USERNAME", "").strip()
@@ -124,7 +123,10 @@ def _try_copernicus_layers(
     ts_iso: str,
     datasets_cfg: Dict[str, Any],
 ) -> Tuple[Optional[Dict[str, np.ndarray]], Dict[str, Any]]:
-    # ✅ CHANGED: read both env name variants
+    # Normalize datasets.json structure: allow either root keys or {"cmems": {...}}
+    if isinstance(datasets_cfg, dict) and "cmems" in datasets_cfg and isinstance(datasets_cfg["cmems"], dict):
+        datasets_cfg = datasets_cfg["cmems"]
+
     user, pwd = _get_copernicus_creds()
     status: Dict[str, Any] = {"provider": "copernicusmarine", "ok": False, "errors": []}
 
@@ -148,7 +150,6 @@ def _try_copernicus_layers(
 
     lon_min, lat_min, lon_max, lat_max = bbox
     t0 = dtparser.isoparse(ts_iso).astimezone(tz.UTC)
-    t1 = t0
 
     def _subset_one(key: str) -> Path:
         cfg = datasets_cfg[key]
@@ -160,11 +161,12 @@ def _try_copernicus_layers(
             vars_ = [v] if v else []
         if not vars_:
             raise RuntimeError(f"{key}: variables list is empty in datasets.json")
+
         # Best-effort "latest available" fallback: try nearest times (handles daily / cadence gaps)
         offsets_h = [0, -6, -12, -18, -24, 6, 12, 18, 24]
         last_err: Optional[Exception] = None
         for off in offsets_h:
-            tt0 = t0 + timedelta(hours=off)  # NOTE: dt is not imported in your file; see note below
+            tt0 = t0 + timedelta(hours=off)
             tt1 = tt0
             p = tmpdir / f"{key}_{tt0.strftime('%Y%m%dT%H%M%S')}.nc"
             try:
@@ -240,10 +242,6 @@ def _try_copernicus_layers(
         return None, status
 
 
-# -----------------------------
-# Rest of your file unchanged
-# -----------------------------
-
 def _write_meta_index(out_root: Path, run_entry: Dict[str, Any]) -> None:
     idx_path = out_root / "meta_index.json"
     if idx_path.exists():
@@ -266,15 +264,7 @@ def _write_meta_index(out_root: Path, run_entry: Dict[str, Any]) -> None:
 
 
 def _write_latest_index_and_meta(out_root: Path, run_entry: Dict[str, Any], variant: str) -> None:
-    """Write tiny, stable endpoints under `docs/latest/`.
-
-    People often sanity-check these URLs in the browser:
-      - /latest/index.json
-      - /latest/meta.json
-
-    The app UI *still* relies on meta_index.json + runs/main/...; these files are
-    just a lightweight compatibility layer (and a nice UX for the landing page).
-    """
+    """Write tiny, stable endpoints under `docs/latest/`."""
     run_root = out_root / run_entry.get("path", "")
     run_meta_path = run_root / "meta.json"
     run_meta = None
@@ -339,9 +329,7 @@ def run_daily(
     variant: str = "auto",
     gear_depths_m: List[int] = [5, 10, 15, 20],
 ) -> str:
-    """
-    Returns run_id written under out_root/runs/<run_id>.
-    """
+    """Returns run_id written under out_root/runs/<run_id>."""
     now_utc, time_source = trusted_utc_now()
     anchor = now_utc.date() if date.lower() == "today" else datetime.fromisoformat(date).date()
 
@@ -361,15 +349,6 @@ def run_daily(
     run_root = out_root / "runs" / run_id
     run_root.mkdir(parents=True, exist_ok=True)
 
-    prev_meta_path = run_root / "meta.json"
-    prev_time_ids: List[str] = []
-    if prev_meta_path.exists():
-        try:
-            prev = json.loads(prev_meta_path.read_text(encoding="utf-8"))
-            prev_time_ids = list(prev.get("time_ids", []) or [])
-        except Exception:
-            prev_time_ids = []
-
     run_meta = {
         "run_id": run_id,
         "date": anchor.isoformat(),
@@ -388,6 +367,8 @@ def run_daily(
 
     datasets_cfg_path = Path("backend/config/datasets.json")
     datasets_cfg = json.loads(datasets_cfg_path.read_text(encoding="utf-8")) if datasets_cfg_path.exists() else {}
+    if isinstance(datasets_cfg, dict) and "cmems" in datasets_cfg and isinstance(datasets_cfg["cmems"], dict):
+        datasets_cfg = datasets_cfg["cmems"]
 
     for sp, prof in species_profiles.items():
         priors = prof.get("priors", {})
@@ -438,10 +419,6 @@ def run_daily(
         provider_status: List[Dict[str, Any]] = []
         for ts_iso in ts_list:
             tid = id_by_iso[ts_iso]
-
-            if (times_root / tid / "pcatch_f32.bin").exists():
-                provider_status.append({"timestamp": ts_iso, "skipped": True, "reason": "already_exists"})
-                continue
 
             layers, status = _try_copernicus_layers(grid, bbox, ts_iso, datasets_cfg) if datasets_cfg else (None, {"provider":"none","ok":False,"errors":["no datasets.json"]})
             if layers is None:
@@ -499,48 +476,12 @@ def run_daily(
         write_json(sp_root / "meta.json", sp_meta2)
         minify_json_for_web(sp_root / "meta.json")
 
-    anchor_dt = datetime(anchor.year, anchor.month, anchor.day, 0, 0, 0, tzinfo=timezone.utc)
-    cutoff_dt = anchor_dt - timedelta(days=max(int(past_days), 0))
-
-    sp0 = next(iter(species_profiles.keys())) if species_profiles else None
-    existing_time_ids: List[str] = []
-    if sp0:
-        times_dir = run_root / "variants" / variant / "species" / sp0 / "times"
-        if times_dir.exists():
-            existing_time_ids = sorted([p.name for p in times_dir.iterdir() if p.is_dir()])
-
-    import shutil
-    for tid in list(existing_time_ids):
-        try:
-            tdt = _dt_from_time_id(tid)
-        except Exception:
-            continue
-        if tdt < cutoff_dt:
-            for sp in species_profiles.keys():
-                tpath = run_root / "variants" / variant / "species" / sp / "times" / tid
-                if tpath.exists():
-                    shutil.rmtree(tpath, ignore_errors=True)
-
-    existing_time_ids = []
-    if sp0:
-        times_dir = run_root / "variants" / variant / "species" / sp0 / "times"
-        if times_dir.exists():
-            existing_time_ids = sorted([p.name for p in times_dir.iterdir() if p.is_dir()])
-
-    run_meta2 = json.loads((run_root / "meta.json").read_text(encoding="utf-8"))
-    run_meta2["past_days_kept"] = int(past_days)
-    run_meta2["future_days_target"] = int(future_days)
-    run_meta2["available_time_ids"] = existing_time_ids
-    run_meta2["latest_available_time_id"] = existing_time_ids[-1] if existing_time_ids else None
-    write_json(run_root / "meta.json", run_meta2)
-    minify_json_for_web(run_root / "meta.json")
-
     run_entry = {
         "run_id": run_id,
         "path": f"runs/{run_id}",
         "fast": False,
         "date": anchor.isoformat(),
-        "time_count": len(existing_time_ids),
+        "time_count": len(time_ids),
         "variants": [variant],
         "species": list(species_profiles.keys()),
         "generated_at_utc": now_utc.isoformat().replace("+00:00", "Z"),
