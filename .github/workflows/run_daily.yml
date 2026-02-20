@@ -3,7 +3,7 @@ name: Run daily + publish docs
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 3 * * *"   # هر روز 03:00 UTC (دلخواه)
+    - cron: "0 3 * * *"
 
 permissions:
   contents: write
@@ -13,17 +13,13 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      # Copernicus Marine Toolbox expected names
       COPERNICUSMARINE_SERVICE_USERNAME: ${{ secrets.COPERNICUSMARINE_SERVICE_USERNAME }}
       COPERNICUSMARINE_SERVICE_PASSWORD: ${{ secrets.COPERNICUSMARINE_SERVICE_PASSWORD }}
 
-      # Your project expected names (alias)
       COPERNICUS_MARINE_USERNAME: ${{ secrets.COPERNICUSMARINE_SERVICE_USERNAME }}
       COPERNICUS_MARINE_PASSWORD: ${{ secrets.COPERNICUSMARINE_SERVICE_PASSWORD }}
 
-      # (اختیاری) توکن‌های دیگر
       GFW_API_ACCESS_TOKEN: ${{ secrets.GFW_API_ACCESS_TOKEN }}
-
       PYTHONUNBUFFERED: "1"
 
     steps:
@@ -40,7 +36,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r backend/requirements.txt
           pip install -U copernicusmarine
-          pip install -e ./backend
 
       - name: Sanity check env (safe)
         run: |
@@ -54,6 +49,7 @@ jobs:
 
       - name: Run pipeline (writes docs/latest)
         run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE/backend"
           python -m seydyaar run-daily --out docs/latest --past-days 7 --future-days 4 --step-hours 6 --grid 220x220
 
       - name: Commit & push updated docs
