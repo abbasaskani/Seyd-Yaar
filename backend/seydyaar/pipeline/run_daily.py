@@ -164,7 +164,7 @@ def _try_copernicus_layers(
         offsets_h = [0, -6, -12, -18, -24, 6, 12, 18, 24]
         last_err: Optional[Exception] = None
         for off in offsets_h:
-            tt0 = t0 + dt.timedelta(hours=off)  # NOTE: dt is not imported in your file; see note below
+            tt0 = t0 + timedelta(hours=off)  # NOTE: dt is not imported in your file; see note below
             tt1 = tt0
             p = tmpdir / f"{key}_{tt0.strftime('%Y%m%dT%H%M%S')}.nc"
             try:
