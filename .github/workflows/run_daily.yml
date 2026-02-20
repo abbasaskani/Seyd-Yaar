@@ -1,42 +1,68 @@
-name: Seyd-Yaar Daily Run
+name: Run daily + publish docs
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "15 3 * * *"   # daily 03:15 UTC
+    - cron: "0 3 * * *"   # هر روز 03:00 UTC (دلخواه)
+
 permissions:
   contents: write
 
 jobs:
   run:
     runs-on: ubuntu-latest
+
+    # ✅ این envها مهم‌ترین قسمت‌اند: alias برای toolbox + پروژه شما
+    env:
+      # Copernicus Marine Toolbox expected names
+      COPERNICUSMARINE_SERVICE_USERNAME: ${{ secrets.COPERNICUSMARINE_SERVICE_USERNAME }}
+      COPERNICUSMARINE_SERVICE_PASSWORD: ${{ secrets.COPERNICUSMARINE_SERVICE_PASSWORD }}
+
+      # Your project expected names (alias)
+      COPERNICUS_MARINE_USERNAME: ${{ secrets.COPERNICUSMARINE_SERVICE_USERNAME }}
+      COPERNICUS_MARINE_PASSWORD: ${{ secrets.COPERNICUSMARINE_SERVICE_PASSWORD }}
+
+      # (اختیاری) توکن‌های دیگر
+      GFW_API_ACCESS_TOKEN: ${{ secrets.GFW_API_ACCESS_TOKEN }}
+
+      # Python deterministic
+      PYTHONUNBUFFERED: "1"
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install deps
+      - name: Install backend deps
         run: |
           python -m pip install --upgrade pip
           pip install -r backend/requirements.txt
+          pip install -U copernicusmarine
 
-      - name: Run generator
-        env:
-          COPERNICUS_MARINE_USERNAME: ${{ secrets.COPERNICUS_MARINE_USERNAME }}
-          COPERNICUS_MARINE_PASSWORD: ${{ secrets.COPERNICUS_MARINE_PASSWORD }}
-          GFW_API_TOKEN: ${{ secrets.GFW_API_TOKEN }}
+      # (اختیاری ولی مفید) چاپ امن اینکه env ست شده (بدون لو دادن پسورد)
+      - name: Sanity check env (safe)
         run: |
-          # Product rule: 6-hour cadence, keep 2 days past + up to 10 days forecast
-          PYTHONPATH=backend python -m seydyaar run-daily --out docs/latest --past-days 2 --future-days 10 --step-hours 6
+          python - << 'PY'
+          import os
+          u = os.getenv("COPERNICUS_MARINE_USERNAME") or os.getenv("COPERNICUSMARINE_SERVICE_USERNAME")
+          p = os.getenv("COPERNICUS_MARINE_PASSWORD") or os.getenv("COPERNICUSMARINE_SERVICE_PASSWORD")
+          print("Has username:", bool(u))
+          print("Has password:", bool(p))
+          PY
 
-      - name: Commit outputs
+      - name: Run pipeline (writes docs/latest)
+        run: |
+          cd backend
+          python -m seydyaar run-daily --out ../docs/latest --past-days 7 --future-days 4 --step-hours 6 --grid 220x220
+
+      - name: Commit & push updated docs
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add docs/latest
-          git commit -m "Update daily outputs" || echo "No changes"
+          git commit -m "Update docs/latest (auto)" || echo "No changes to commit"
           git push
