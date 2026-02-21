@@ -3,7 +3,7 @@ name: Run daily + publish docs
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 3 * * *"
+    - cron: "0 3 * * *"   # daily 03:00 UTC
 
 permissions:
   contents: write
@@ -13,6 +13,8 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
+      COPERNICUSMARINE_LOG_LEVEL: WARNING
+
       COPERNICUSMARINE_SERVICE_USERNAME: ${{ secrets.COPERNICUSMARINE_SERVICE_USERNAME }}
       COPERNICUSMARINE_SERVICE_PASSWORD: ${{ secrets.COPERNICUSMARINE_SERVICE_PASSWORD }}
 
@@ -20,6 +22,7 @@ jobs:
       COPERNICUS_MARINE_PASSWORD: ${{ secrets.COPERNICUSMARINE_SERVICE_PASSWORD }}
 
       GFW_API_ACCESS_TOKEN: ${{ secrets.GFW_API_ACCESS_TOKEN }}
+
       PYTHONUNBUFFERED: "1"
 
     steps:
@@ -36,6 +39,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r backend/requirements.txt
           pip install -U copernicusmarine
+          pip install h5py netCDF4
 
       - name: Sanity check env (safe)
         run: |
