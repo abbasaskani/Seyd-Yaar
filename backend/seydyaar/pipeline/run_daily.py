@@ -423,6 +423,12 @@ def run_daily(
         for ts_iso in ts_list:
             tid = id_by_iso[ts_iso]
 
+            force = os.getenv("SEYDYAAR_FORCE_REGEN", "0") == "1"
+            # De-duplicate across runs unless forced: if this timestamp was already generated, don't regenerate it.
+            if (not force) and (times_root / tid / "pcatch_scoring_f32.bin").exists():
+                provider_status.append({"timestamp": ts_iso, "skipped": True, "reason": "already_exists"})
+                continue
+
             # De-duplicate across runs: if outputs already exist for this time, skip recompute
             if (times_root / tid / "pcatch_scoring_f32.bin").exists():
                 provider_status.append({"timestamp": ts_iso, "skipped": True, "reason": "already_exists"})
