@@ -7,3 +7,5 @@ python-dateutil>=2.8
 
 python-dotenv>=1.0
 copernicusmarine>=2.0
+h5py>=3.10
+netCDF4>=1.6
