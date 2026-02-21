@@ -370,7 +370,13 @@ def run_daily(
     if isinstance(datasets_cfg, dict) and "cmems" in datasets_cfg and isinstance(datasets_cfg["cmems"], dict):
         datasets_cfg = datasets_cfg["cmems"]
 
-    for sp, prof in species_profiles.items():
+    
+    # ------------------------------------------------------------------
+    # Performance: fetch Copernicus layers ONCE per timestamp, reuse for all species.
+    # This avoids duplicating remote subset calls for each species.
+    # ------------------------------------------------------------------
+    layers_cache: Dict[str, Tuple[Dict[str, np.ndarray], Dict[str, Any]]] = {}
+for sp, prof in species_profiles.items():
         priors = prof.get("priors", {})
         weights = prof.get("layer_weights", {})
         ops_priors = prof.get("ops_constraints", {})
@@ -420,7 +426,18 @@ def run_daily(
         for ts_iso in ts_list:
             tid = id_by_iso[ts_iso]
 
-            layers, status = _try_copernicus_layers(grid, bbox, ts_iso, datasets_cfg) if datasets_cfg else (None, {"provider":"none","ok":False,"errors":["no datasets.json"]})
+
+            # De-duplicate across runs: if this timestamp was already generated, don't regenerate it.
+            if (times_root / tid / "pcatch_scoring_f32.bin").exists():
+                provider_status.append({"timestamp": ts_iso, "skipped": True, "reason": "already_exists"})
+                continue
+            # Reuse cached environmental layers for this timestamp if available.
+if tid in layers_cache:
+    layers, status = layers_cache[tid]
+else:
+    layers, status = _try_copernicus_layers(grid, bbox, ts_iso, datasets_cfg) if datasets_cfg else (None, {"provider":"none","ok":False,"errors":["no datasets.json"]})
+layers_cache[tid] = (layers, status)
+
             if layers is None:
                 layers = _synthetic_env_layers(grid, ts_iso)
                 status = {**status, "fallback": "synthetic"}
