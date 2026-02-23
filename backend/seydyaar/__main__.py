@@ -40,8 +40,8 @@ def main() -> None:
 
     p = sub.add_parser("demo-generate", help="Generate an offline demo run into docs/latest")
     p.add_argument("--date", default="today", help="Run date (YYYY-MM-DD) or 'today'")
-    p.add_argument("--past-days", type=int, default=0, help="Past days to include (max 7 recommended)")
-    p.add_argument("--future-days", type=int, default=0, help="Future days to include (max 4 recommended)")
+    p.add_argument("--past-days", type=int, default=2, help="Past days to include (max 2 recommended)")
+    p.add_argument("--future-days", type=int, default=10, help="Future days to include (max 10 recommended)")
     p.add_argument("--step-hours", type=int, default=6, help="Time step in hours (2 is 'default' for full mode)")
     p.add_argument("--fast", action="store_true", help="Fast demo (coarser grid, fewer background samples)")
     p.add_argument("--out", default=str(Path("docs") / "latest"), help="Output folder")
