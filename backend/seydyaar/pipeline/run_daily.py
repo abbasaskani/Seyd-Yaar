@@ -3,26 +3,11 @@ from __future__ import annotations
 """
 Scheduled "real" run generator for GitHub Pages hosting.
 
-Key idea:
-- GitHub Pages is static, so the web app *reads files* under docs/latest/.
-- GitHub Actions runs this generator daily and commits new outputs.
-
-This pipeline writes the SAME file layout that docs/app.js expects:
-  docs/latest/meta_index.json
-  docs/latest/runs/<run_id>/meta.json
-  docs/latest/runs/<run_id>/variants/<variant>/species/<species>/meta.json
-  docs/latest/runs/<run_id>/variants/<variant>/species/<species>/mask_u8.bin
-  docs/latest/runs/<run_id>/variants/<variant>/species/<species>/times/<timeId>/<layers>.bin
-
-Layers written per time (all float32 bins unless noted):
-  pcatch_f32.bin, phab_f32.bin, pops_f32.bin, agree_f32.bin, spread_f32.bin
-  sst_f32.bin, chl_f32.bin, current_f32.bin, waves_f32.bin, front_f32.bin
-  qc_chl_u8.bin (quality mask, uint8 0/1)
-  conf_f32.bin (confidence 0..1, float32)
-
-Real data:
-- If Copernicus Marine is configured (env user/pass + datasets.json filled), the code *tries* to use it.
-- Otherwise, it falls back to deterministic synthetic layers (keeps UI working end-to-end).
+This version includes:
+- Copernicus credentials env fallback (project + toolbox names)
+- datasets.json normalization (supports {"cmems": {...}})
+- Copernicus layer caching per timestamp (reuse across species)
+- Force rebuild switch: SEYDYAAR_FORCE_REGEN=1 (overwrites even if outputs exist)
 """
 
 from dataclasses import dataclass
@@ -56,23 +41,11 @@ def _seed_from_ts(ts_iso: str) -> int:
 
 def _dt_from_time_id(time_id: str) -> datetime:
     """Parse YYYYMMDD_HHMMZ into aware UTC datetime."""
-    # Example: 20260211_0600Z
     return datetime.strptime(time_id, "%Y%m%d_%H%MZ").replace(tzinfo=timezone.utc)
 
 
 def _get_copernicus_creds() -> Tuple[str, str]:
-    """
-    Prefer project env names, fallback to Copernicus Marine Toolbox env names.
-    Returns (username, password) or ("","") if missing.
-
-    Project (legacy/custom) names:
-      - COPERNICUS_MARINE_USERNAME
-      - COPERNICUS_MARINE_PASSWORD
-
-    Copernicus Marine Toolbox names:
-      - COPERNICUSMARINE_SERVICE_USERNAME
-      - COPERNICUSMARINE_SERVICE_PASSWORD
-    """
+    """Accept both project and toolbox env var names."""
     user = os.getenv("COPERNICUS_MARINE_USERNAME", "").strip()
     pwd = os.getenv("COPERNICUS_MARINE_PASSWORD", "").strip()
 
@@ -103,7 +76,7 @@ def _synthetic_env_layers(grid: GridSpec, ts_iso: str) -> Dict[str, np.ndarray]:
     waves = 1.1 + 0.4 * np.cos((lat2d - lat2d.mean()) * math.pi / 14.0)
     waves = np.clip(waves + rng.normal(0, 0.05, size=waves.shape), 0.0, 4.0)
 
-    qc_chl = (rng.random(size=chl.shape) > 0.07).astype(np.uint8)  # ~7% "bad" pixels
+    qc_chl = (rng.random(size=chl.shape) > 0.07).astype(np.uint8)
     conf = qc_chl.astype(np.float32)
 
     return {
@@ -123,12 +96,9 @@ def _try_copernicus_layers(
     ts_iso: str,
     datasets_cfg: Dict[str, Any],
 ) -> Tuple[Optional[Dict[str, np.ndarray]], Dict[str, Any]]:
-    # Normalize datasets.json structure: allow either root keys or {"cmems": {...}}
+    # Normalize datasets config: allow {"cmems": {...}} or direct mapping.
     if isinstance(datasets_cfg, dict) and "cmems" in datasets_cfg and isinstance(datasets_cfg["cmems"], dict):
         datasets_cfg = datasets_cfg["cmems"]
-
-    # Performance: fetch Copernicus layers ONCE per timestamp, reuse for all species
-    layers_cache: Dict[str, Tuple[Dict[str, np.ndarray], Dict[str, Any]]] = {}
 
     user, pwd = _get_copernicus_creds()
     status: Dict[str, Any] = {"provider": "copernicusmarine", "ok": False, "errors": []}
@@ -157,7 +127,7 @@ def _try_copernicus_layers(
     def _subset_one(key: str) -> Path:
         cfg = datasets_cfg[key]
         dsid = cfg["dataset_id"]
-        # Support both "variable" (single) and "variables" (list)
+
         vars_ = cfg.get("variables", None)
         if not vars_:
             v = cfg.get("variable", None)
@@ -165,9 +135,9 @@ def _try_copernicus_layers(
         if not vars_:
             raise RuntimeError(f"{key}: variables list is empty in datasets.json")
 
-        # Best-effort "latest available" fallback: try nearest times (handles daily / cadence gaps)
         offsets_h = [0, -6, -12, -18, -24, 6, 12, 18, 24]
         last_err: Optional[Exception] = None
+
         for off in offsets_h:
             tt0 = t0 + timedelta(hours=off)
             tt1 = tt0
@@ -191,6 +161,7 @@ def _try_copernicus_layers(
             except Exception as e:
                 last_err = e
                 continue
+
         raise RuntimeError(f"{key}: subset failed for {t0.isoformat()} (tried ±24h). Last error: {last_err}")
 
     def _read_nc_var(path: Path, var: str) -> np.ndarray:
@@ -200,6 +171,7 @@ def _try_copernicus_layers(
         return arr
 
     out: Dict[str, np.ndarray] = {}
+
     try:
         def _v0(key: str) -> str:
             cfg = datasets_cfg[key]
@@ -232,7 +204,6 @@ def _try_copernicus_layers(
         p = _subset_one("waves")
         out["waves_hs_m"] = _read_nc_var(p, _v0("waves"))
 
-        # placeholders for QC/conf (real QC needs dataset QA flags; keep 1 for now)
         qc = np.ones_like(out["chl_mg_m3"], dtype=np.uint8)
         conf = qc.astype(np.float32)
         out["qc_chl"] = qc
@@ -240,6 +211,7 @@ def _try_copernicus_layers(
 
         status["ok"] = True
         return out, status
+
     except Exception as e:
         status["errors"].append(str(e))
         return None, status
@@ -267,7 +239,6 @@ def _write_meta_index(out_root: Path, run_entry: Dict[str, Any]) -> None:
 
 
 def _write_latest_index_and_meta(out_root: Path, run_entry: Dict[str, Any], variant: str) -> None:
-    """Write tiny, stable endpoints under `docs/latest/`."""
     run_root = out_root / run_entry.get("path", "")
     run_meta_path = run_root / "meta.json"
     run_meta = None
@@ -332,7 +303,6 @@ def run_daily(
     variant: str = "auto",
     gear_depths_m: List[int] = [5, 10, 15, 20],
 ) -> str:
-    """Returns run_id written under out_root/runs/<run_id>."""
     now_utc, time_source = trusted_utc_now()
     anchor = now_utc.date() if date.lower() == "today" else datetime.fromisoformat(date).date()
 
@@ -372,6 +342,11 @@ def run_daily(
     datasets_cfg = json.loads(datasets_cfg_path.read_text(encoding="utf-8")) if datasets_cfg_path.exists() else {}
     if isinstance(datasets_cfg, dict) and "cmems" in datasets_cfg and isinstance(datasets_cfg["cmems"], dict):
         datasets_cfg = datasets_cfg["cmems"]
+
+    # >>> IMPORTANT: define cache HERE (always in run_daily scope)
+    layers_cache: Dict[str, Tuple[Dict[str, np.ndarray], Dict[str, Any]]] = {}
+
+    force = os.getenv("SEYDYAAR_FORCE_REGEN", "0") == "1"
 
     for sp, prof in species_profiles.items():
         priors = prof.get("priors", {})
@@ -420,21 +395,21 @@ def run_daily(
         minify_json_for_web(sp_root / "meta.json")
 
         provider_status: List[Dict[str, Any]] = []
+
         for ts_iso in ts_list:
             tid = id_by_iso[ts_iso]
 
-            force = os.getenv("SEYDYAAR_FORCE_REGEN", "0") == "1"
-            # De-duplicate across runs unless forced: if this timestamp was already generated, don't regenerate it.
             if (not force) and (times_root / tid / "pcatch_scoring_f32.bin").exists():
                 provider_status.append({"timestamp": ts_iso, "skipped": True, "reason": "already_exists"})
                 continue
 
-            # De-duplicate across runs: if outputs already exist for this time, skip recompute
-            if (times_root / tid / "pcatch_scoring_f32.bin").exists():
-                provider_status.append({"timestamp": ts_iso, "skipped": True, "reason": "already_exists"})
-                continue
+            # Cache across species by tid
+            # Defensive: ensure cache exists (prevents NameError if file was partially edited)
+            try:
+                layers_cache
+            except NameError:
+                layers_cache = {}
 
-            # Fetch environmental layers ONCE per timestamp (shared across species)
             if tid in layers_cache:
                 layers, status = layers_cache[tid]
             else:
@@ -463,7 +438,7 @@ def run_daily(
                 waves_hs_m=layers["waves_hs_m"],
                 ssh_m=layers["ssh_m"],
             )
-            phab, _comps = habitat_scoring(inputs, priors=priors, weights=weights)
+            phab, _ = habitat_scoring(inputs, priors=priors, weights=weights)
             pops = ops_feasibility(inputs.current_m_s, inputs.waves_hs_m, ops_priors, gear_depth_m=10.0)
             pcatch = np.clip(phab * pops, 0, 1).astype(np.float32)
 
