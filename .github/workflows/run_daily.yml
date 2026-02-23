@@ -13,15 +13,19 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
+      # Reduce Copernicus toolbox verbosity
       COPERNICUSMARINE_LOG_LEVEL: WARNING
 
+      # Copernicus Marine Toolbox expected names
       COPERNICUSMARINE_SERVICE_USERNAME: ${{ secrets.COPERNICUSMARINE_SERVICE_USERNAME }}
       COPERNICUSMARINE_SERVICE_PASSWORD: ${{ secrets.COPERNICUSMARINE_SERVICE_PASSWORD }}
 
+      # Your project expected names (alias)
       COPERNICUS_MARINE_USERNAME: ${{ secrets.COPERNICUSMARINE_SERVICE_USERNAME }}
       COPERNICUS_MARINE_PASSWORD: ${{ secrets.COPERNICUSMARINE_SERVICE_PASSWORD }}
 
-      GFW_API_ACCESS_TOKEN: ${{ secrets.GFW_API_ACCESS_TOKEN }}
+      # Force overwrite of existing outputs (set to "1" only when you want a full rebuild)
+      SEYDYAAR_FORCE_REGEN: "0"
 
       PYTHONUNBUFFERED: "1"
 
@@ -34,27 +38,17 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install backend deps
+      - name: Install deps
         run: |
           python -m pip install --upgrade pip
           pip install -r backend/requirements.txt
           pip install -U copernicusmarine
           pip install h5py netCDF4
 
-      - name: Sanity check env (safe)
-        run: |
-          python - << 'PY'
-          import os
-          u = (os.getenv("COPERNICUS_MARINE_USERNAME") or os.getenv("COPERNICUSMARINE_SERVICE_USERNAME") or "").strip()
-          p = (os.getenv("COPERNICUS_MARINE_PASSWORD") or os.getenv("COPERNICUSMARINE_SERVICE_PASSWORD") or "").strip()
-          print("Has username:", bool(u))
-          print("Has password:", bool(p))
-          PY
-
       - name: Run pipeline (writes docs/latest)
         run: |
           export PYTHONPATH="$GITHUB_WORKSPACE/backend"
-          python -m seydyaar run-daily --out docs/latest --past-days 7 --future-days 4 --step-hours 6 --grid 220x220
+          python -m seydyaar run-daily --out docs/latest --past-days 2 --future-days 10 --step-hours 6 --grid 220x220
 
       - name: Commit & push updated docs
         run: |
