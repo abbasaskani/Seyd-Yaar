@@ -167,11 +167,19 @@ function fmtTime(isoZ){
   }catch{ return isoZ; }
 }
 function timeIdFromIso(isoZ){
-  // Prefer run-provided time_ids mapping (supports index-style folders like 0000..0143)
-  if(state && state.isoToTimeId && state.isoToTimeId[isoZ]) return state.isoToTimeId[isoZ];
   if(typeof isoZ !== "string") return "";
-  // Fallback: sanitize ISO (legacy demo runs)
-  return isoZ.replace(/[:\-]/g, "").replace("T","_").replace("Z","");
+  // Canonicalize to Z-ISO so strings like +00:00 match our lookup keys
+  let key = isoZ;
+  try{ key = (new Date(isoZ)).toISOString(); }catch{ /* keep original */ }
+
+  // Prefer run-provided time_ids mapping (folder ids like 20260226_1200Z)
+  if(state && state.isoToTimeId){
+    if(state.isoToTimeId[key]) return state.isoToTimeId[key];
+    if(state.isoToTimeId[isoZ]) return state.isoToTimeId[isoZ]; // legacy
+  }
+
+  // Fallback: sanitize (legacy demo runs)
+  return key.replace(/[:\-]/g, "").replace("T","_").replace("Z","");
 }
 
 function timeIdToIso(tid){
@@ -188,6 +196,41 @@ async function fetchJson(url){
   if(!r.ok) throw new Error(`HTTP ${r.status} ${url}`);
   return r.json();
 }
+
+/* ------------------------------
+   Meta/Grid normalization (schema-safe) ✅
+------------------------------ */
+function normalizeMeta(meta){
+  if(!meta || typeof meta !== "object") return meta;
+
+  // handle snake_case vs camelCase keys
+  meta.timeIds = meta.timeIds ?? meta.time_ids;
+  meta.time_ids = meta.time_ids ?? meta.timeIds;
+
+  // Canonicalize time strings to Z-ISO so +00:00 and Z variants match
+  if(Array.isArray(meta.times)){
+    meta.times = meta.times.map(t=>{
+      try{ return (new Date(t)).toISOString(); }catch{ return t; }
+    });
+  }
+
+  return meta;
+}
+function normalizeGrid(grid){
+  if(!grid || typeof grid !== "object") return grid;
+  // Ensure Leaflet-friendly bounds: [[S,W],[N,E]]
+  if(!grid.bounds){
+    const S = grid.lat_min ?? grid.south ?? grid.minLat;
+    const N = grid.lat_max ?? grid.north ?? grid.maxLat;
+    const W = grid.lon_min ?? grid.west  ?? grid.minLon;
+    const E = grid.lon_max ?? grid.east  ?? grid.maxLon;
+    if([S,W,N,E].every(Number.isFinite)){
+      grid.bounds = [[S, W],[N, E]];
+    }
+  }
+  return grid;
+}
+
 async function fetchBin(url, dtype){
   if(state.cache.has(url)) return state.cache.get(url);
   const r = await fetch(url);
@@ -449,6 +492,7 @@ function renderOverlay(arr01, conf01){
   state.ctx.putImageData(img, 0, 0);
   const url = state.canvas.toDataURL("image/png");
 
+  if(!bounds || !bounds[0] || !bounds[1]){ console.error('Invalid grid.bounds; expected [[S,W],[N,E]]', state.grid); toast(lang==='fa'?'خطا: محدوده نقشه (bounds) در meta.json تعریف نشده':'Error: grid bounds missing in meta.json', 'err'); return; }
   const b = [[bounds[0][0], bounds[0][1]], [bounds[1][0], bounds[1][1]]]; // [[S,W],[N,E]]
   if(!imageOverlay){
     imageOverlay = L.imageOverlay(url, b, {opacity: 1.0, interactive:false}).addTo(map);
@@ -844,10 +888,10 @@ async function loadSpeciesMetaAndInit(){
   state.species = $("speciesSelect").value;
   // species meta path:
   const url = `latest/${state.runPath}/variants/${state.variant}/species/${state.species}/meta.json`;
-  state.meta = await fetchJson(url);
+  state.meta = normalizeMeta(await fetchJson(url));
   // run-level meta for availability reporting + deduped time catalog
   state.runMeta = await fetchJson(`latest/${state.runPath}/meta.json`).catch(()=>null);
-  state.grid = state.meta.grid;
+  state.grid = normalizeGrid(state.meta.grid);
 
   // load server mask
   const maskUrl = `latest/${state.runPath}/${state.meta.paths.mask}`;
