@@ -17,6 +17,7 @@ from typing import Dict, Any, List, Tuple, Optional
 import json
 import os
 import math
+import hashlib
 import numpy as np
 import requests
 from dateutil import parser as dtparser
@@ -96,6 +97,16 @@ def _try_copernicus_layers(
     ts_iso: str,
     datasets_cfg: Dict[str, Any],
 ) -> Tuple[Optional[Dict[str, np.ndarray]], Dict[str, Any]]:
+    """
+    Try to download required layers from Copernicus Marine using the toolbox.
+
+    Also writes an auditable JSONL manifest to SEYDYAAR_LOG_DIR/download_manifest.jsonl.
+    Each successful/failed subset attempt is written as one JSON line with:
+      - key, dataset_id, variables
+      - requested_time_utc, resolved_time_utc
+      - output_nc, bytes, sha256
+      - ok, error (if any)
+    """
     # Normalize datasets config: allow {"cmems": {...}} or direct mapping.
     if isinstance(datasets_cfg, dict) and "cmems" in datasets_cfg and isinstance(datasets_cfg["cmems"], dict):
         datasets_cfg = datasets_cfg["cmems"]
@@ -121,8 +132,32 @@ def _try_copernicus_layers(
     tmpdir = Path(os.getenv("SEYDYAAR_TMPDIR", ".seydyaar_tmp"))
     tmpdir.mkdir(parents=True, exist_ok=True)
 
+    # Manifest (auditable trail)
+    log_dir = Path(os.getenv("SEYDYAAR_LOG_DIR", "docs/latest/logs"))
+    log_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = log_dir / "download_manifest.jsonl"
+
+    # Optional verification snapshot (keep a single timestamp's NetCDFs under docs/latest/verify/<time_id>/)
+    verify_tid = os.getenv("SEYDYAAR_VERIFY_TIME_ID", "").strip()
+    verify_dir = Path(os.getenv("SEYDYAAR_VERIFY_DIR", "docs/latest/verify"))
+    if verify_tid:
+        (verify_dir / verify_tid).mkdir(parents=True, exist_ok=True)
+
     lon_min, lat_min, lon_max, lat_max = bbox
     t0 = dtparser.isoparse(ts_iso).astimezone(tz.UTC)
+    tid = time_id_from_iso(ts_iso)
+
+    def _sha256(path: Path) -> str:
+        h = hashlib.sha256()
+        with path.open("rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(chunk)
+        return h.hexdigest()
+
+    def _append_manifest(rec: Dict[str, Any]) -> None:
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        with manifest_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
     def _subset_one(key: str) -> Path:
         cfg = datasets_cfg[key]
@@ -135,13 +170,34 @@ def _try_copernicus_layers(
         if not vars_:
             raise RuntimeError(f"{key}: variables list is empty in datasets.json")
 
-        offsets_h = [0, -6, -12, -18, -24, 6, 12, 18, 24]
+        # Time handling:
+        # - For daily datasets (P1D), force request at 00:00Z to avoid out-of-range intra-day timestamps.
+        tt_base = t0
+        if key == "chl":
+            tt_base = datetime(tt_base.year, tt_base.month, tt_base.day, 0, 0, 0, tzinfo=timezone.utc)
+            offsets = [0, -24, -48, -72]  # don't try future for daily chl
+        else:
+            offsets = [0, -6, -12, -18, -24, 6, 12, 18, 24]
+
         last_err: Optional[Exception] = None
 
-        for off in offsets_h:
-            tt0 = t0 + timedelta(hours=off)
+        for off in offsets:
+            tt0 = tt_base + timedelta(hours=off)
             tt1 = tt0
+
             p = tmpdir / f"{key}_{tt0.strftime('%Y%m%dT%H%M%S')}.nc"
+            rec: Dict[str, Any] = {
+                "time_id": tid,
+                "key": key,
+                "dataset_id": dsid,
+                "variables": vars_,
+                "requested_time_utc": t0.isoformat(),
+                "attempt_time_utc": tt0.isoformat(),
+                "bbox": [lon_min, lat_min, lon_max, lat_max],
+                "min_depth": cfg.get("depth_m", None),
+                "max_depth": cfg.get("depth_m", None),
+            }
+
             try:
                 copernicusmarine.subset(
                     dataset_id=dsid,
@@ -159,13 +215,37 @@ def _try_copernicus_layers(
                     password=pwd,
                     output_filename=str(p),
                 )
+
+                # Record + copy for verification snapshot
+                size = p.stat().st_size if p.exists() else 0
+                rec.update({
+                    "ok": True,
+                    "resolved_time_utc": tt0.isoformat(),
+                    "output_nc": str(p),
+                    "bytes": int(size),
+                    "sha256": _sha256(p) if p.exists() else None,
+                })
+                _append_manifest(rec)
+
                 status.setdefault("resolved_times", {})[key] = tt0.isoformat()
+
+                if verify_tid and tid == verify_tid and p.exists():
+                    dst = (verify_dir / verify_tid / f"{key}.nc")
+                    try:
+                        dst.write_bytes(p.read_bytes())
+                    except Exception:
+                        # best-effort; manifest still records output_nc
+                        pass
+
                 return p
+
             except Exception as e:
                 last_err = e
+                rec.update({"ok": False, "error": str(e)})
+                _append_manifest(rec)
                 continue
 
-        raise RuntimeError(f"{key}: subset failed for {t0.isoformat()} (tried ±24h). Last error: {last_err}")
+        raise RuntimeError(f"{key}: subset failed for {t0.isoformat()} (tried offsets). Last error: {last_err}")
 
     def _read_nc_var(path: Path, var: str) -> np.ndarray:
         import rasterio
@@ -218,7 +298,6 @@ def _try_copernicus_layers(
     except Exception as e:
         status["errors"].append(str(e))
         return None, status
-
 
 def _write_meta_index(out_root: Path, run_entry: Dict[str, Any]) -> None:
     idx_path = out_root / "meta_index.json"
@@ -346,6 +425,15 @@ def run_daily(
     if isinstance(datasets_cfg, dict) and "cmems" in datasets_cfg and isinstance(datasets_cfg["cmems"], dict):
         datasets_cfg = datasets_cfg["cmems"]
 
+    # Verification snapshot: keep NetCDFs for anchor date 00:00Z under docs/latest/verify/<time_id>/
+    try:
+        verify_iso = f"{anchor.isoformat()}T00:00:00+00:00"
+        os.environ.setdefault("SEYDYAAR_VERIFY_TIME_ID", time_id_from_iso(verify_iso))
+    except Exception:
+        pass
+
+    strict = os.getenv("SEYDYAAR_STRICT_COPERNICUS", "0") == "1"
+
     # >>> IMPORTANT: define cache HERE (always in run_daily scope)
     layers_cache: Dict[str, Tuple[Dict[str, np.ndarray], Dict[str, Any]]] = {}
 
@@ -418,6 +506,8 @@ def run_daily(
             else:
                 layers, status = _try_copernicus_layers(grid, bbox, ts_iso, datasets_cfg) if datasets_cfg else (None, {"provider":"none","ok":False,"errors":["no datasets.json"]})
                 if layers is None:
+                    if strict:
+                        raise RuntimeError("Copernicus download failed (strict mode). Errors: " + "; ".join(status.get("errors", [])))
                     layers = _synthetic_env_layers(grid, ts_iso)
                     status = {**status, "fallback": "synthetic"}
                 layers_cache[tid] = (layers, status)
