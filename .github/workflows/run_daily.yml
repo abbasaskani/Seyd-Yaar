@@ -29,11 +29,8 @@ jobs:
       # Where to save downloaded .nc during the run
       SEYDYAAR_TMPDIR: "backend/.seydyaar_tmp"
 
-      # Where to write manifests (these will be committed because they're under docs/latest)
+      # Where to write manifests/logs under docs/latest (these will be committed)
       SEYDYAAR_LOG_DIR: "docs/latest/logs"
-
-      # Incremental by default (set to 1 only when you want full rebuild)
-      SEYDYAAR_FORCE_REGEN: "0"
 
       PYTHONUNBUFFERED: "1"
 
@@ -51,7 +48,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r backend/requirements.txt
           pip install -U copernicusmarine
-          pip install h5py netCDF4
+
+      # ✅ Add the 'describe' step HERE (after copernicusmarine install, before pipeline run)
+      - name: Describe SSH dataset (prints variables/versions)
+        run: |
+          copernicusmarine describe --dataset-id cmems_mod_glo_phy_anfc_0.083deg_PT1H-m
+          # If you want to see all published versions:
+          # copernicusmarine describe --dataset-id cmems_mod_glo_phy_anfc_0.083deg_PT1H-m --show-all-versions
 
       # 1) Validate *repo* JSON/GEOJSON early (catches broken config files)
       - name: Validate all JSON and GEOJSON (repo)
@@ -80,18 +83,6 @@ jobs:
               raise SystemExit(1)
 
           print("✅ All repo JSON/GEOJSON files are valid.")
-          PY
-
-      # Optional: print a couple of key fields so it's obvious which CMEMS dataset/variable is used
-      - name: Debug datasets.json (prints key fields)
-        run: |
-          python - << 'PY'
-          import json
-          p = "backend/config/datasets.json"
-          cfg = json.load(open(p, "r", encoding="utf-8"))
-          cm = cfg.get("cmems", cfg)
-          print("ssh.dataset_id =", cm["ssh"]["dataset_id"])
-          print("ssh.variable   =", cm["ssh"]["variable"])
           PY
 
       - name: Run pipeline (writes docs/latest)
@@ -126,23 +117,6 @@ jobs:
 
           print("✅ All docs/latest JSON outputs are valid.")
           PY
-
-      - name: List downloaded NetCDFs (tmpdir)
-        if: always()
-        run: |
-          echo "=== NetCDF files under backend/.seydyaar_tmp ==="
-          ls -lah backend/.seydyaar_tmp || true
-          echo "=== Count ==="
-          (ls -1 backend/.seydyaar_tmp/*.nc 2>/dev/null | wc -l) || true
-
-      - name: Upload NetCDFs as artifact (optional)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: copernicus_nc_files
-          path: backend/.seydyaar_tmp/*.nc
-          if-no-files-found: ignore
-          retention-days: 3
 
       - name: Commit & push updated docs
         run: |
