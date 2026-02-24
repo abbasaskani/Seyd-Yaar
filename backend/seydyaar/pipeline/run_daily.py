@@ -1,53 +1,34 @@
 from __future__ import annotations
 
 """
-Seyd-Yaar daily pipeline (STRICT + transparent download logging)
+Scheduled "real" run generator for GitHub Pages hosting.
 
-What this version guarantees:
-1) STRICT mode: if Copernicus fails for ANY layer -> raise error (NO synthetic fallback).
-2) Full download transparency: logs dataset_id, variables, requested/resolved time,
-   bbox, output .nc path, bytes + sha256, units, and unit conversion applied.
-3) Keeps the same docs/latest output layout expected by your web UI.
-
-Env vars:
-- SEYDYAAR_STRICT_COPERNICUS=1   -> fail hard if any Copernicus layer fails
-- SEYDYAAR_TMPDIR=.seydyaar_tmp  -> where to store downloaded .nc files (relative to cwd)
-- SEYDYAAR_LOG_DIR=docs/latest/logs -> where to store manifest logs (relative to cwd)
-- SEYDYAAR_FORCE_REGEN=1         -> rebuild even if outputs exist
+This version includes:
+- Copernicus credentials env fallback (project + toolbox names)
+- datasets.json normalization (supports {"cmems": {...}})
+- Copernicus layer caching per timestamp (reuse across species)
+- Force rebuild switch: SEYDYAAR_FORCE_REGEN=1 (overwrites even if outputs exist)
 """
 
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Any, List, Tuple, Optional
 import json
 import os
 import math
-import hashlib
-
 import numpy as np
+import requests
 from dateutil import parser as dtparser
 from dateutil import tz
 
 from ..utils_geo import bbox_from_geojson, GridSpec, mask_from_geojson
-from ..utils_time import trusted_utc_now, timestamps_for_range, time_id_from_iso
+from ..utils_time import trusted_utc_now, timestamps_for_range
+from ..utils_time import time_id_from_iso
 from ..models.scoring import HabitatInputs, habitat_scoring, gradient_magnitude, front_score
 from ..models.ops import ops_feasibility
 from ..models.ensemble import ensemble_stats
 from .io import write_bin_f32, write_bin_u8, write_json, minify_json_for_web
-
-
-STRICT_COPERNICUS = os.getenv("SEYDYAAR_STRICT_COPERNICUS", "0") == "1"
-SEYDYAAR_TMPDIR = os.getenv("SEYDYAAR_TMPDIR", ".seydyaar_tmp")
-SEYDYAAR_LOG_DIR = os.getenv("SEYDYAAR_LOG_DIR", "docs/latest/logs")
-FORCE_REGEN = os.getenv("SEYDYAAR_FORCE_REGEN", "0") == "1"
-
-
-def _sha256_file(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
 
 
 def _seed_from_ts(ts_iso: str) -> int:
@@ -58,20 +39,25 @@ def _seed_from_ts(ts_iso: str) -> int:
     return int(h)
 
 
+def _dt_from_time_id(time_id: str) -> datetime:
+    """Parse YYYYMMDD_HHMMZ into aware UTC datetime."""
+    return datetime.strptime(time_id, "%Y%m%d_%H%MZ").replace(tzinfo=timezone.utc)
+
+
 def _get_copernicus_creds() -> Tuple[str, str]:
-    user = (os.getenv("COPERNICUS_MARINE_USERNAME", "") or os.getenv("COPERNICUSMARINE_SERVICE_USERNAME", "")).strip()
-    pwd = (os.getenv("COPERNICUS_MARINE_PASSWORD", "") or os.getenv("COPERNICUSMARINE_SERVICE_PASSWORD", "")).strip()
+    """Accept both project and toolbox env var names."""
+    user = os.getenv("COPERNICUS_MARINE_USERNAME", "").strip()
+    pwd = os.getenv("COPERNICUS_MARINE_PASSWORD", "").strip()
+
+    if not user:
+        user = os.getenv("COPERNICUSMARINE_SERVICE_USERNAME", "").strip()
+    if not pwd:
+        pwd = os.getenv("COPERNICUSMARINE_SERVICE_PASSWORD", "").strip()
+
     return user, pwd
 
 
-def _append_jsonl(path: Path, record: Dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
-
-
 def _synthetic_env_layers(grid: GridSpec, ts_iso: str) -> Dict[str, np.ndarray]:
-    """Development-only. STRICT mode must never allow reaching this."""
     rng = np.random.default_rng(_seed_from_ts(ts_iso))
     lon2d, lat2d = grid.lonlat_mesh()
 
@@ -104,46 +90,36 @@ def _synthetic_env_layers(grid: GridSpec, ts_iso: str) -> Dict[str, np.ndarray]:
     }
 
 
-def _apply_conversion(arr: np.ndarray, convert: Optional[str]) -> Tuple[np.ndarray, Optional[str]]:
-    if not convert:
-        return arr, None
-    if convert == "K_TO_C":
-        return (arr - 273.15).astype(np.float32), "K_TO_C (value - 273.15)"
-    return arr, f"unknown_convert:{convert}"
-
-
 def _try_copernicus_layers(
     grid: GridSpec,
     bbox: Tuple[float, float, float, float],
     ts_iso: str,
     datasets_cfg: Dict[str, Any],
-) -> Tuple[Dict[str, np.ndarray], Dict[str, Any]]:
-    """
-    Returns:
-      layers dict (sst_c, chl_mg_m3, ssh_m, current_m_s, waves_hs_m, qc_chl, conf)
-      status dict: provider/ok/errors/downloads/resolved_times
-    """
-    # Allow config shape: {"cmems": {...}} or direct
+) -> Tuple[Optional[Dict[str, np.ndarray]], Dict[str, Any]]:
+    # Normalize datasets config: allow {"cmems": {...}} or direct mapping.
     if isinstance(datasets_cfg, dict) and "cmems" in datasets_cfg and isinstance(datasets_cfg["cmems"], dict):
         datasets_cfg = datasets_cfg["cmems"]
 
     user, pwd = _get_copernicus_creds()
-    status: Dict[str, Any] = {"provider": "copernicusmarine", "ok": False, "errors": [], "downloads": []}
+    status: Dict[str, Any] = {"provider": "copernicusmarine", "ok": False, "errors": []}
 
     if not (user and pwd):
-        raise RuntimeError("Missing Copernicus credentials: set COPERNICUSMARINE_SERVICE_* (or COPERNICUS_MARINE_*)")
+        status["errors"].append("missing Copernicus credentials (COPERNICUS_MARINE_* or COPERNICUSMARINE_SERVICE_*)")
+        return None, status
 
     try:
         import copernicusmarine  # type: ignore
     except Exception as e:
-        raise RuntimeError(f"copernicusmarine import failed: {e}")
+        status["errors"].append(f"copernicusmarine import failed: {e}")
+        return None, status
 
     for k in ["sst", "chl", "ssh", "currents", "waves"]:
         if not str(datasets_cfg.get(k, {}).get("dataset_id", "")).strip():
-            raise RuntimeError(f"datasets.json missing dataset_id for '{k}'")
+            status["errors"].append(f"datasets.json missing dataset_id for '{k}'")
+            return None, status
 
-    tmpdir = Path(SEYDYAAR_TMPDIR)
-    tmpdir.mkdir(exist_ok=True)
+    tmpdir = Path(os.getenv("SEYDYAAR_TMPDIR", ".seydyaar_tmp"))
+    tmpdir.mkdir(parents=True, exist_ok=True)
 
     lon_min, lat_min, lon_max, lat_max = bbox
     t0 = dtparser.isoparse(ts_iso).astimezone(tz.UTC)
@@ -152,15 +128,19 @@ def _try_copernicus_layers(
         cfg = datasets_cfg[key]
         dsid = cfg["dataset_id"]
 
-        vars_ = cfg.get("variables") or ([cfg.get("variable")] if cfg.get("variable") else [])
+        vars_ = cfg.get("variables", None)
         if not vars_:
-            raise RuntimeError(f"{key}: empty variables list in datasets.json")
+            v = cfg.get("variable", None)
+            vars_ = [v] if v else []
+        if not vars_:
+            raise RuntimeError(f"{key}: variables list is empty in datasets.json")
 
         offsets_h = [0, -6, -12, -18, -24, 6, 12, 18, 24]
         last_err: Optional[Exception] = None
 
         for off in offsets_h:
             tt0 = t0 + timedelta(hours=off)
+            tt1 = tt0
             p = tmpdir / f"{key}_{tt0.strftime('%Y%m%dT%H%M%S')}.nc"
             try:
                 copernicusmarine.subset(
@@ -170,30 +150,15 @@ def _try_copernicus_layers(
                     maximum_longitude=lon_max,
                     minimum_latitude=lat_min,
                     maximum_latitude=lat_max,
+                    minimum_depth=cfg.get("depth_m", None),
+                    maximum_depth=cfg.get("depth_m", None),
+                    coordinates_selection_method="nearest",
                     start_datetime=tt0.isoformat(),
-                    end_datetime=tt0.isoformat(),
+                    end_datetime=tt1.isoformat(),
                     username=user,
                     password=pwd,
                     output_filename=str(p),
-                    overwrite=True,
                 )
-
-                # record file facts
-                size = p.stat().st_size
-                sha = _sha256_file(p)
-                status["downloads"].append({
-                    "layer_key": key,
-                    "dataset_id": dsid,
-                    "variables": vars_,
-                    "requested_time": t0.isoformat(),
-                    "resolved_time": tt0.isoformat(),
-                    "bbox": [lon_min, lat_min, lon_max, lat_max],
-                    "output_nc": str(p),
-                    "bytes": size,
-                    "sha256": sha,
-                    "units": cfg.get("units"),
-                    "convert": cfg.get("convert"),
-                })
                 status.setdefault("resolved_times", {})[key] = tt0.isoformat()
                 return p
             except Exception as e:
@@ -205,55 +170,54 @@ def _try_copernicus_layers(
     def _read_nc_var(path: Path, var: str) -> np.ndarray:
         import rasterio
         with rasterio.open(f'NETCDF:"{path}":{var}') as ds:
-            return ds.read(1).astype(np.float32)
+            arr = ds.read(1).astype(np.float32)
+        return arr
 
     out: Dict[str, np.ndarray] = {}
 
-    # SST
-    p = _subset_one("sst")
-    sst = _read_nc_var(p, datasets_cfg["sst"]["variable"])
-    sst, note = _apply_conversion(sst, datasets_cfg["sst"].get("convert"))
-    if note:
-        status["downloads"][-1]["convert_applied"] = note
-    out["sst_c"] = sst
+    try:
+        def _v0(key: str) -> str:
+            cfg = datasets_cfg[key]
+            vs = cfg.get("variables")
+            if vs and len(vs) > 0:
+                return vs[0]
+            v = cfg.get("variable")
+            if not v:
+                raise RuntimeError(f"datasets.json missing variable(s) for '{key}'")
+            return v
 
-    # CHL
-    p = _subset_one("chl")
-    chl = _read_nc_var(p, datasets_cfg["chl"]["variable"])
-    chl, note = _apply_conversion(chl, datasets_cfg["chl"].get("convert"))
-    if note:
-        status["downloads"][-1]["convert_applied"] = note
-    out["chl_mg_m3"] = chl
+        p = _subset_one("sst")
+        out["sst_c"] = _read_nc_var(p, _v0("sst"))
 
-    # SSH (SLA proxy allowed)
-    p = _subset_one("ssh")
-    ssh = _read_nc_var(p, datasets_cfg["ssh"]["variable"])
-    ssh, note = _apply_conversion(ssh, datasets_cfg["ssh"].get("convert"))
-    if note:
-        status["downloads"][-1]["convert_applied"] = note
-    out["ssh_m"] = ssh
+        p = _subset_one("chl")
+        out["chl_mg_m3"] = _read_nc_var(p, _v0("chl"))
 
-    # currents (uo/vo)
-    p = _subset_one("currents")
-    u = _read_nc_var(p, datasets_cfg["currents"]["variables"][0])
-    v = _read_nc_var(p, datasets_cfg["currents"]["variables"][1])
-    out["current_m_s"] = np.sqrt(u*u + v*v).astype(np.float32)
+        p = _subset_one("ssh")
+        out["ssh_m"] = _read_nc_var(p, _v0("ssh"))
 
-    # waves
-    p = _subset_one("waves")
-    waves = _read_nc_var(p, datasets_cfg["waves"]["variable"])
-    waves, note = _apply_conversion(waves, datasets_cfg["waves"].get("convert"))
-    if note:
-        status["downloads"][-1]["convert_applied"] = note
-    out["waves_hs_m"] = waves
+        p = _subset_one("currents")
+        vars_uv = datasets_cfg["currents"]["variables"]
+        if len(vars_uv) >= 2:
+            u = _read_nc_var(p, vars_uv[0])
+            v = _read_nc_var(p, vars_uv[1])
+            out["current_m_s"] = np.sqrt(u*u + v*v).astype(np.float32)
+        else:
+            out["current_m_s"] = _read_nc_var(p, vars_uv[0])
 
-    qc = np.ones_like(out["chl_mg_m3"], dtype=np.uint8)
-    conf = qc.astype(np.float32)
-    out["qc_chl"] = qc
-    out["conf"] = conf
+        p = _subset_one("waves")
+        out["waves_hs_m"] = _read_nc_var(p, _v0("waves"))
 
-    status["ok"] = True
-    return out, status
+        qc = np.ones_like(out["chl_mg_m3"], dtype=np.uint8)
+        conf = qc.astype(np.float32)
+        out["qc_chl"] = qc
+        out["conf"] = conf
+
+        status["ok"] = True
+        return out, status
+
+    except Exception as e:
+        status["errors"].append(str(e))
+        return None, status
 
 
 def _write_meta_index(out_root: Path, run_entry: Dict[str, Any]) -> None:
@@ -301,9 +265,11 @@ def _write_latest_index_and_meta(out_root: Path, run_entry: Dict[str, Any], vari
         "run_path": run_entry.get("path"),
         "variant_default": variant,
         "species": run_entry.get("species", []),
+        "models": run_entry.get("models", []),
         "time_count": len(time_ids),
         "available_time_ids": time_ids,
         "latest_available_time_id": latest_tid,
+        "notes": "Compatibility endpoint. Raw outputs live under runs/<run_id>/variants/...",
     }
     idx_out = out_root / "index.json"
     write_json(idx_out, index)
@@ -318,6 +284,9 @@ def _write_latest_index_and_meta(out_root: Path, run_entry: Dict[str, Any], vari
         "latest_available_time_id": latest_tid,
         "grid": (run_meta or {}).get("grid"),
         "bbox": (run_meta or {}).get("bbox"),
+        "aoi": (run_meta or {}).get("aoi"),
+        "species": run_entry.get("species", []),
+        "models": run_entry.get("models", []),
         "available_time_ids": time_ids,
     }
     meta_out = out_root / "meta.json"
@@ -356,21 +325,37 @@ def run_daily(
     run_root = out_root / "runs" / run_id
     run_root.mkdir(parents=True, exist_ok=True)
 
+    run_meta = {
+        "run_id": run_id,
+        "date": anchor.isoformat(),
+        "generated_at_utc": now_utc.isoformat().replace("+00:00", "Z"),
+        "time_source": time_source,
+        "times": ts_list,
+        "time_ids": time_ids,
+        "variants": [variant],
+        "species": list(species_profiles.keys()),
+        "bbox": list(bbox),
+        "step_hours": step_hours,
+        "grid": {"width": W, "height": H, "lon_min": grid.lon_min, "lon_max": grid.lon_max, "lat_min": grid.lat_min, "lat_max": grid.lat_max},
+    }
+    write_json(run_root / "meta.json", run_meta)
+    minify_json_for_web(run_root / "meta.json")
+
     datasets_cfg_path = Path("backend/config/datasets.json")
-    datasets_cfg = json.loads(datasets_cfg_path.read_text(encoding="utf-8"))
+    datasets_cfg = json.loads(datasets_cfg_path.read_text(encoding="utf-8")) if datasets_cfg_path.exists() else {}
+    if isinstance(datasets_cfg, dict) and "cmems" in datasets_cfg and isinstance(datasets_cfg["cmems"], dict):
+        datasets_cfg = datasets_cfg["cmems"]
 
-    # Manifest file committed under docs/latest/logs
-    log_dir = Path(SEYDYAAR_LOG_DIR)
-    log_dir.mkdir(parents=True, exist_ok=True)
-    manifest_jsonl = log_dir / "download_manifest.jsonl"
-
-    # Cache per time_id (shared between species)
+    # >>> IMPORTANT: define cache HERE (always in run_daily scope)
     layers_cache: Dict[str, Tuple[Dict[str, np.ndarray], Dict[str, Any]]] = {}
+
+    force = os.getenv("SEYDYAAR_FORCE_REGEN", "0") == "1"
 
     for sp, prof in species_profiles.items():
         priors = prof.get("priors", {})
         weights = prof.get("layer_weights", {})
-        ops_priors = {**priors, **prof.get("ops_constraints", {})}
+        ops_priors = prof.get("ops_constraints", {})
+        ops_priors = {**priors, **ops_priors}
 
         sp_root = run_root / "variants" / variant / "species" / sp
         times_root = sp_root / "times"
@@ -381,10 +366,33 @@ def run_daily(
         sp_meta = {
             "species": sp,
             "label": prof.get("label", {}),
-            "grid": {"width": W, "height": H, "lon_min": grid.lon_min, "lon_max": grid.lon_max, "lat_min": grid.lat_min, "lat_max": grid.lat_max},
+            "grid": run_meta["grid"],
             "times": ts_list,
             "time_ids": time_ids,
-            "download_manifest": str((Path(SEYDYAAR_LOG_DIR) / "download_manifest.jsonl").as_posix()),
+            "paths": {
+                "mask": f"variants/{variant}/species/{sp}/mask_u8.bin",
+                "per_time": {
+                    "pcatch_scoring": f"variants/{variant}/species/{sp}/times/{{time}}/pcatch_scoring_f32.bin",
+                    "pcatch_frontplus": f"variants/{variant}/species/{sp}/times/{{time}}/pcatch_frontplus_f32.bin",
+                    "pcatch_ensemble": f"variants/{variant}/species/{sp}/times/{{time}}/pcatch_ensemble_f32.bin",
+                    "phab_scoring": f"variants/{variant}/species/{sp}/times/{{time}}/phab_f32.bin",
+                    "phab_frontplus": f"variants/{variant}/species/{sp}/times/{{time}}/phab_f32.bin",
+                    "pops": f"variants/{variant}/species/{sp}/times/{{time}}/pops_f32.bin",
+                    "agree": f"variants/{variant}/species/{sp}/times/{{time}}/agree_f32.bin",
+                    "spread": f"variants/{variant}/species/{sp}/times/{{time}}/spread_f32.bin",
+                    "front": f"variants/{variant}/species/{sp}/times/{{time}}/front_f32.bin",
+                    "sst": f"variants/{variant}/species/{sp}/times/{{time}}/sst_f32.bin",
+                    "chl": f"variants/{variant}/species/{sp}/times/{{time}}/chl_f32.bin",
+                    "current": f"variants/{variant}/species/{sp}/times/{{time}}/current_f32.bin",
+                    "waves": f"variants/{variant}/species/{sp}/times/{{time}}/waves_f32.bin",
+                    "conf": f"variants/{variant}/species/{sp}/times/{{time}}/conf_f32.bin",
+                    "qc_chl": f"variants/{variant}/species/{sp}/times/{{time}}/qc_chl_u8.bin",
+                },
+            },
+            "model_info": {
+                "habitat": {"priors": priors, "weights": weights},
+                "ops": {"priors": ops_priors, "gear_depths_m": gear_depths_m},
+            },
         }
         write_json(sp_root / "meta.json", sp_meta)
         minify_json_for_web(sp_root / "meta.json")
@@ -394,34 +402,28 @@ def run_daily(
         for ts_iso in ts_list:
             tid = id_by_iso[ts_iso]
 
-            if (not FORCE_REGEN) and (times_root / tid / "pcatch_ensemble_f32.bin").exists():
+            if (not force) and (times_root / tid / "pcatch_scoring_f32.bin").exists():
                 provider_status.append({"timestamp": ts_iso, "skipped": True, "reason": "already_exists"})
                 continue
+
+            # Cache across species by tid
+            # Defensive: ensure cache exists (prevents NameError if file was partially edited)
+            try:
+                layers_cache
+            except NameError:
+                layers_cache = {}
 
             if tid in layers_cache:
                 layers, status = layers_cache[tid]
             else:
-                # STRICT download: if fails -> raises (NO synthetic)
-                layers, status = _try_copernicus_layers(grid, bbox, ts_iso, datasets_cfg)
+                layers, status = _try_copernicus_layers(grid, bbox, ts_iso, datasets_cfg) if datasets_cfg else (None, {"provider":"none","ok":False,"errors":["no datasets.json"]})
+                if layers is None:
+                    layers = _synthetic_env_layers(grid, ts_iso)
+                    status = {**status, "fallback": "synthetic"}
                 layers_cache[tid] = (layers, status)
-
-                # Write one manifest record per time_id (shared by both species)
-                _append_jsonl(
-                    manifest_jsonl,
-                    {
-                        "generated_at_utc": now_utc.isoformat().replace("+00:00", "Z"),
-                        "time_id": tid,
-                        "timestamp": ts_iso,
-                        "bbox": list(bbox),
-                        "grid": {"width": W, "height": H},
-                        "tmpdir": str(Path(SEYDYAAR_TMPDIR).resolve()),
-                        "status": status,
-                    },
-                )
 
             provider_status.append({"timestamp": ts_iso, **status})
 
-            # Fronts
             t_front = gradient_magnitude(layers["sst_c"])
             c_front = gradient_magnitude(layers["chl_mg_m3"])
             s_front = gradient_magnitude(layers["ssh_m"])
@@ -459,7 +461,6 @@ def run_daily(
             write_bin_f32(tdir / "spread_f32.bin", spread)
             write_bin_f32(tdir / "front_f32.bin", f)
 
-            # covariates
             write_bin_f32(tdir / "sst_f32.bin", inputs.sst_c.astype(np.float32))
             write_bin_f32(tdir / "chl_f32.bin", inputs.chl_mg_m3.astype(np.float32))
             write_bin_f32(tdir / "current_f32.bin", inputs.current_m_s.astype(np.float32))
@@ -473,26 +474,10 @@ def run_daily(
         write_json(sp_root / "meta.json", sp_meta2)
         minify_json_for_web(sp_root / "meta.json")
 
-    run_meta = {
-        "run_id": run_id,
-        "generated_at_utc": now_utc.isoformat().replace("+00:00", "Z"),
-        "time_source": time_source,
-        "times": ts_list,
-        "time_ids": time_ids,
-        "available_time_ids": time_ids,
-        "latest_available_time_id": time_ids[-1] if time_ids else None,
-        "bbox": list(bbox),
-        "grid": {"width": W, "height": H, "lon_min": grid.lon_min, "lon_max": grid.lon_max, "lat_min": grid.lat_min, "lat_max": grid.lat_max},
-        "strict_copernicus": True,
-        "tmpdir": str(Path(SEYDYAAR_TMPDIR).resolve()),
-        "download_manifest": str((Path(SEYDYAAR_LOG_DIR) / "download_manifest.jsonl").as_posix()),
-    }
-    write_json(run_root / "meta.json", run_meta)
-    minify_json_for_web(run_root / "meta.json")
-
     run_entry = {
         "run_id": run_id,
         "path": f"runs/{run_id}",
+        "fast": False,
         "date": anchor.isoformat(),
         "time_count": len(time_ids),
         "variants": [variant],
