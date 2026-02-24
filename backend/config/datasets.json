@@ -16,17 +16,14 @@
     },
     "currents": {
       "dataset_id": "cmems_mod_glo_phy-cur_anfc_0.083deg_PT6H-i",
-      "variables": [
-        "uo",
-        "vo"
-      ],
+      "variables": ["uo", "vo"],
       "depth_m": 0,
       "units": "m s-1",
       "convert": null
     },
     "ssh": {
       "dataset_id": "cmems_mod_glo_phy_anfc_merged-sl_PT1H-i",
-      "variable": "variable": "sea_surface_height",
+      "variable": "zos",
       "units": "m",
       "convert": null,
       "notes": "Sea level, hourly. Variable typically 'zos' (sea surface height)."
