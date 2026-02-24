@@ -160,6 +160,28 @@ const state = {
   qcMaskCache: new Map(), // timeId-> Uint8Array
 };
 
+// --- ensureGridBounds: always have Leaflet-compatible bounds for image overlay ---
+// Leaflet expects [[South,West],[North,East]] for L.imageOverlay bounds.
+function ensureGridBounds(){
+  if(!state.grid) state.grid = {};
+  const g = state.grid;
+  // If already valid, keep it
+  if(Array.isArray(g.bounds) && g.bounds.length===2 && Array.isArray(g.bounds[0]) && Array.isArray(g.bounds[1])){
+    return;
+  }
+  const latMin = g.lat_min ?? g.minLat ?? g.latMin;
+  const latMax = g.lat_max ?? g.maxLat ?? g.latMax;
+  const lonMin = g.lon_min ?? g.minLon ?? g.lonMin;
+  const lonMax = g.lon_max ?? g.maxLon ?? g.lonMax;
+  if([latMin, latMax, lonMin, lonMax].every(Number.isFinite)){
+    g.bounds = [[latMin, lonMin],[latMax, lonMax]];
+  }else{
+    // Leave as null; renderOverlay will safely abort with a useful console error.
+    g.bounds = null;
+  }
+}
+
+
 function fmtTime(isoZ){
   try{
     const d = new Date(isoZ);
@@ -167,19 +189,11 @@ function fmtTime(isoZ){
   }catch{ return isoZ; }
 }
 function timeIdFromIso(isoZ){
+  // Prefer run-provided time_ids mapping (supports index-style folders like 0000..0143)
+  if(state && state.isoToTimeId && state.isoToTimeId[isoZ]) return state.isoToTimeId[isoZ];
   if(typeof isoZ !== "string") return "";
-  // Canonicalize to Z-ISO so strings like +00:00 match our lookup keys
-  let key = isoZ;
-  try{ key = (new Date(isoZ)).toISOString(); }catch{ /* keep original */ }
-
-  // Prefer run-provided time_ids mapping (folder ids like 20260226_1200Z)
-  if(state && state.isoToTimeId){
-    if(state.isoToTimeId[key]) return state.isoToTimeId[key];
-    if(state.isoToTimeId[isoZ]) return state.isoToTimeId[isoZ]; // legacy
-  }
-
-  // Fallback: sanitize (legacy demo runs)
-  return key.replace(/[:\-]/g, "").replace("T","_").replace("Z","");
+  // Fallback: sanitize ISO (legacy demo runs)
+  return isoZ.replace(/[:\-]/g, "").replace("T","_").replace("Z","");
 }
 
 function timeIdToIso(tid){
@@ -196,41 +210,6 @@ async function fetchJson(url){
   if(!r.ok) throw new Error(`HTTP ${r.status} ${url}`);
   return r.json();
 }
-
-/* ------------------------------
-   Meta/Grid normalization (schema-safe) ✅
------------------------------- */
-function normalizeMeta(meta){
-  if(!meta || typeof meta !== "object") return meta;
-
-  // handle snake_case vs camelCase keys
-  meta.timeIds = meta.timeIds ?? meta.time_ids;
-  meta.time_ids = meta.time_ids ?? meta.timeIds;
-
-  // Canonicalize time strings to Z-ISO so +00:00 and Z variants match
-  if(Array.isArray(meta.times)){
-    meta.times = meta.times.map(t=>{
-      try{ return (new Date(t)).toISOString(); }catch{ return t; }
-    });
-  }
-
-  return meta;
-}
-function normalizeGrid(grid){
-  if(!grid || typeof grid !== "object") return grid;
-  // Ensure Leaflet-friendly bounds: [[S,W],[N,E]]
-  if(!grid.bounds){
-    const S = grid.lat_min ?? grid.south ?? grid.minLat;
-    const N = grid.lat_max ?? grid.north ?? grid.maxLat;
-    const W = grid.lon_min ?? grid.west  ?? grid.minLon;
-    const E = grid.lon_max ?? grid.east  ?? grid.maxLon;
-    if([S,W,N,E].every(Number.isFinite)){
-      grid.bounds = [[S, W],[N, E]];
-    }
-  }
-  return grid;
-}
-
 async function fetchBin(url, dtype){
   if(state.cache.has(url)) return state.cache.get(url);
   const r = await fetch(url);
@@ -470,7 +449,13 @@ function setLegend(title){
 }
 
 function renderOverlay(arr01, conf01){
-  const {width:W, height:H, bounds} = state.grid;
+  ensureGridBounds();
+  const {width:W, height:H} = state.grid;
+  const bounds = state.grid.bounds;
+  if(!bounds || !bounds[0] || !bounds[1]){
+    console.error('Invalid grid bounds; cannot render overlay. state.grid=', state.grid);
+    return;
+  }
   state.canvas.width = W;
   state.canvas.height = H;
   const img = state.ctx.createImageData(W, H);
@@ -492,7 +477,6 @@ function renderOverlay(arr01, conf01){
   state.ctx.putImageData(img, 0, 0);
   const url = state.canvas.toDataURL("image/png");
 
-  if(!bounds || !bounds[0] || !bounds[1]){ console.error('Invalid grid.bounds; expected [[S,W],[N,E]]', state.grid); toast(lang==='fa'?'خطا: محدوده نقشه (bounds) در meta.json تعریف نشده':'Error: grid bounds missing in meta.json', 'err'); return; }
   const b = [[bounds[0][0], bounds[0][1]], [bounds[1][0], bounds[1][1]]]; // [[S,W],[N,E]]
   if(!imageOverlay){
     imageOverlay = L.imageOverlay(url, b, {opacity: 1.0, interactive:false}).addTo(map);
@@ -888,10 +872,11 @@ async function loadSpeciesMetaAndInit(){
   state.species = $("speciesSelect").value;
   // species meta path:
   const url = `latest/${state.runPath}/variants/${state.variant}/species/${state.species}/meta.json`;
-  state.meta = normalizeMeta(await fetchJson(url));
+  state.meta = await fetchJson(url);
   // run-level meta for availability reporting + deduped time catalog
   state.runMeta = await fetchJson(`latest/${state.runPath}/meta.json`).catch(()=>null);
-  state.grid = normalizeGrid(state.meta.grid);
+  state.grid = state.meta.grid;
+  ensureGridBounds();
 
   // load server mask
   const maskUrl = `latest/${state.runPath}/${state.meta.paths.mask}`;
@@ -1283,40 +1268,107 @@ $("playBtn").addEventListener("click", ()=>{
     startPlay();
   }
 });
+function __ensureOrder(){
+  const t0El = $("t0Select");
+  const t1El = $("t1Select");
+  if(!t0El || !t1El) return;
+  const v0 = t0El.value;
+  const v1 = t1El.value;
+  // compare as Date to handle formatting differences
+  const d0 = Date.parse(v0);
+  const d1 = Date.parse(v1);
+  if(Number.isFinite(d0) && Number.isFinite(d1) && d0 > d1){
+    // swap selections to enforce From <= To
+    const i0 = t0El.selectedIndex;
+    t0El.selectedIndex = t1El.selectedIndex;
+    t1El.selectedIndex = i0;
+  }
+}
+
+let __playOn = false;
+let __playTimer = null;
+let __playBusy = false;
+
 function startPlay(){
-  state.playing = true;
+  __playOn = true;
   safeText("playBtn", "⏸ Pause");
+  // Make sure range is not inverted at start
+  __ensureOrder();
 
-  // Keep the selected range length fixed, and slide it forward
-  const rangeLen = Math.abs($("t1Select").selectedIndex - $("t0Select").selectedIndex);
+  const t0El = $("t0Select");
+  const t1El = $("t1Select");
+  const n = t0El?.options?.length ?? 0;
+  if(n <= 0){
+    console.warn("No time options to play.");
+    __playOn = false;
+    safeText("playBtn", "▶ Play");
+    return;
+  }
 
-  const tick = async ()=>{
-    const i0 = $("t0Select").selectedIndex;
-    const i1 = $("t1Select").selectedIndex;
-    const dir = (i1 >= i0) ? 1 : -1; // preserve ordering
+  // Keep the range length fixed (in indices) based on current selection after ordering.
+  let rangeLen = Math.max(0, t1El.selectedIndex - t0El.selectedIndex);
 
-    let next0 = i0 + dir;
-    let next1 = next0 + dir*rangeLen;
+  const step = async ()=>{
+    if(!__playOn || __playBusy) return;
+    __playBusy = true;
+    try{
+      __ensureOrder();
+      let i0 = t0El.selectedIndex;
+      let i1 = t1El.selectedIndex;
 
-    // wrap
-    if(next0 < 0) next0 = state.times.length-1;
-    if(next0 >= state.times.length) next0 = 0;
-    if(next1 < 0) next1 = state.times.length-1;
-    if(next1 >= state.times.length) next1 = 0;
+      // If user changed selection mid-play, refresh range length.
+      if(i1 < i0){
+        const tmp = i0; i0 = i1; i1 = tmp;
+        t0El.selectedIndex = i0;
+        t1El.selectedIndex = i1;
+      }
+      rangeLen = Math.max(0, i1 - i0);
 
-    $("t0Select").selectedIndex = next0;
-    $("t1Select").selectedIndex = next1;
-    setDirty();
+      // advance forward (newer) by 1 option; wrap around
+      let next0 = i0 + 1;
+      if(next0 >= n) next0 = 0;
+      let next1 = next0 + rangeLen;
+      if(next1 >= n) next1 = n - 1; // clamp at end (no wrap for end)
+
+      t0El.selectedIndex = next0;
+      t1El.selectedIndex = next1;
+
+      // Ensure ordering again (safety)
+      __ensureOrder();
+
+      // Recompute and redraw for new time range
+      if(typeof computeAndRender === "function"){
+        await computeAndRender();
+      }else if(typeof renderFromCache === "function"){
+        await renderFromCache();
+      }
+    }catch(e){
+      console.error("Play step failed:", e);
+      // stop to avoid spamming errors
+      stopPlay();
+      return;
+    }finally{
+      __playBusy = false;
+      if(__playOn){
+        __playTimer = setTimeout(step, 900);
+      }
+    }
   };
 
-  state.timer = setInterval(tick, 900);
+  step();
 }
+
 function stopPlay(){
-  state.playing = false;
+  __playOn = false;
   safeText("playBtn", "▶ Play");
-  if(state.timer) clearInterval(state.timer);
-  state.timer = null;
+  if(__playTimer) clearTimeout(__playTimer);
+  __playTimer = null;
+  __playBusy = false;
 }
+
+// Keep From/To ordered even when user changes them manually
+$("t0Select")?.addEventListener("change", __ensureOrder);
+$("t1Select")?.addEventListener("change", __ensureOrder);
 
 /* ------------------------------
    Download / Share
