@@ -3,7 +3,7 @@ name: Run daily + publish docs
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 3 * * *"   # daily 03:00 UTC
+    - cron: "0 3 * * *"  # daily 03:00 UTC
 
 permissions:
   contents: write
@@ -53,8 +53,37 @@ jobs:
           pip install -U copernicusmarine
           pip install h5py netCDF4
 
-      # ✅ مهم: قبل از اجرا، دقیقاً بگو datasets.json چی می‌گه (برای اینکه مطمئن شی zos نیست)
-      - name: Debug datasets.json (ssh config)
+      # 1) Validate *repo* JSON/GEOJSON early (catches broken config files)
+      - name: Validate all JSON and GEOJSON (repo)
+        run: |
+          python - << 'PY'
+          import json
+          from pathlib import Path
+
+          bad = []
+          for p in Path(".").rglob("*.json"):
+              try:
+                  json.loads(p.read_text(encoding="utf-8"))
+              except Exception as e:
+                  bad.append((str(p), str(e)))
+
+          for p in Path(".").rglob("*.geojson"):
+              try:
+                  json.loads(p.read_text(encoding="utf-8"))
+              except Exception as e:
+                  bad.append((str(p), str(e)))
+
+          if bad:
+              print("❌ Invalid JSON files in repo:")
+              for f, e in bad:
+                  print("-", f, "=>", e)
+              raise SystemExit(1)
+
+          print("✅ All repo JSON/GEOJSON files are valid.")
+          PY
+
+      # Optional: print a couple of key fields so it's obvious which CMEMS dataset/variable is used
+      - name: Debug datasets.json (prints key fields)
         run: |
           python - << 'PY'
           import json
@@ -68,9 +97,36 @@ jobs:
       - name: Run pipeline (writes docs/latest)
         run: |
           export PYTHONPATH="$GITHUB_WORKSPACE/backend"
-          python -m seydyaar run-daily --out docs/latest --past-days 2 --future-days 10 --step-hours 6 --grid 220x220
+          python -m seydyaar run-daily             --out docs/latest             --past-days 2             --future-days 10             --step-hours 6             --grid 220x220
 
-      # ✅ شفافیت: ببین دقیقاً چه .nc هایی ساخته شده
+      # 2) Validate generated outputs (catches truncated/invalid JSON written by the pipeline)
+      - name: Validate JSON outputs (docs/latest)
+        if: always()
+        run: |
+          python - << 'PY'
+          import json
+          from pathlib import Path
+
+          out = Path("docs/latest")
+          if not out.exists():
+              raise SystemExit("docs/latest not found")
+
+          bad = []
+          for p in out.rglob("*.json"):
+              try:
+                  json.loads(p.read_text(encoding="utf-8"))
+              except Exception as e:
+                  bad.append((str(p), str(e)))
+
+          if bad:
+              print("❌ Invalid JSON outputs in docs/latest:")
+              for f, e in bad:
+                  print("-", f, "=>", e)
+              raise SystemExit(1)
+
+          print("✅ All docs/latest JSON outputs are valid.")
+          PY
+
       - name: List downloaded NetCDFs (tmpdir)
         if: always()
         run: |
@@ -79,7 +135,6 @@ jobs:
           echo "=== Count ==="
           (ls -1 backend/.seydyaar_tmp/*.nc 2>/dev/null | wc -l) || true
 
-      # ✅ (اختیاری) اگر می‌خوای nc ها رو هم از صفحه Actions دانلود کنی، این روشن باشه
       - name: Upload NetCDFs as artifact (optional)
         if: always()
         uses: actions/upload-artifact@v4
