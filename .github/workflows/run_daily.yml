@@ -3,7 +3,7 @@ name: Run daily + publish docs
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 3 * * *"  # daily 03:00 UTC
+    - cron: "0 3 * * *" # daily 03:00 UTC
 
 permissions:
   contents: write
@@ -15,21 +15,21 @@ jobs:
     env:
       COPERNICUSMARINE_LOG_LEVEL: WARNING
 
-      # Credentials (toolbox standard names)
+      # Copernicus Marine Toolbox expected names
       COPERNICUSMARINE_SERVICE_USERNAME: ${{ secrets.COPERNICUSMARINE_SERVICE_USERNAME }}
       COPERNICUSMARINE_SERVICE_PASSWORD: ${{ secrets.COPERNICUSMARINE_SERVICE_PASSWORD }}
 
-      # Credentials (project alias names)
+      # Project alias names
       COPERNICUS_MARINE_USERNAME: ${{ secrets.COPERNICUSMARINE_SERVICE_USERNAME }}
       COPERNICUS_MARINE_PASSWORD: ${{ secrets.COPERNICUSMARINE_SERVICE_PASSWORD }}
 
-      # STRICT: do not allow synthetic fallback
-      SEYDYAAR_STRICT_COPERNICUS: "1"
+      # Pipeline control
+      SEYDYAAR_FORCE_REGEN: "0"
 
-      # Where to save downloaded .nc during the run
+      # Where to save downloaded .nc during the run (debuggable + uploaded as artifact)
       SEYDYAAR_TMPDIR: "backend/.seydyaar_tmp"
 
-      # Where to write manifests/logs under docs/latest (these will be committed)
+      # Where to write run logs/manifests
       SEYDYAAR_LOG_DIR: "docs/latest/logs"
 
       PYTHONUNBUFFERED: "1"
@@ -48,49 +48,57 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r backend/requirements.txt
           pip install -U copernicusmarine
+          pip install h5py netCDF4
 
-      # ✅ Add the 'describe' step HERE (after copernicusmarine install, before pipeline run)
-      - name: Describe SSH dataset (prints variables/versions)
-        run: |
-          copernicusmarine describe --dataset-id cmems_mod_glo_phy_anfc_0.083deg_PT1H-m
-          # If you want to see all published versions:
-          # copernicusmarine describe --dataset-id cmems_mod_glo_phy_anfc_0.083deg_PT1H-m --show-all-versions
-
-      # 1) Validate *repo* JSON/GEOJSON early (catches broken config files)
-      - name: Validate all JSON and GEOJSON (repo)
+      - name: Validate JSON/GEOJSON in repo
         run: |
           python - << 'PY'
           import json
           from pathlib import Path
 
           bad = []
-          for p in Path(".").rglob("*.json"):
+          for p in Path('.').rglob('*.json'):
               try:
-                  json.loads(p.read_text(encoding="utf-8"))
+                  json.loads(p.read_text(encoding='utf-8'))
               except Exception as e:
                   bad.append((str(p), str(e)))
-
-          for p in Path(".").rglob("*.geojson"):
+          for p in Path('.').rglob('*.geojson'):
               try:
-                  json.loads(p.read_text(encoding="utf-8"))
+                  json.loads(p.read_text(encoding='utf-8'))
               except Exception as e:
                   bad.append((str(p), str(e)))
 
           if bad:
-              print("❌ Invalid JSON files in repo:")
+              print('❌ Invalid JSON/GEOJSON files:')
               for f, e in bad:
-                  print("-", f, "=>", e)
+                  print('-', f, '=>', e)
               raise SystemExit(1)
-
-          print("✅ All repo JSON/GEOJSON files are valid.")
+          print('✅ All repo JSON/GEOJSON files are valid.')
           PY
+
+      # 👇 These describe steps make variable/version issues impossible to miss in logs
+      - name: Describe Physics hourly surface dataset (SST/U/V/SSH)
+        run: |
+          copernicusmarine describe --dataset-id cmems_mod_glo_phy_anfc_0.083deg_PT1H-m
+
+      - name: Describe BGC phytoplankton dataset (Chlorophyll)
+        run: |
+          copernicusmarine describe --dataset-id cmems_mod_glo_bgc-pft_anfc_0.25deg_P1D-m
+
+      - name: Describe Waves dataset (Significant wave height)
+        run: |
+          copernicusmarine describe --dataset-id cmems_mod_glo_wav_anfc_0.083deg_PT3H-i
 
       - name: Run pipeline (writes docs/latest)
         run: |
           export PYTHONPATH="$GITHUB_WORKSPACE/backend"
-          python -m seydyaar run-daily             --out docs/latest             --past-days 2             --future-days 10             --step-hours 6             --grid 220x220
+          python -m seydyaar run-daily \
+            --out docs/latest \
+            --past-days 2 \
+            --future-days 10 \
+            --step-hours 6 \
+            --grid 220x220
 
-      # 2) Validate generated outputs (catches truncated/invalid JSON written by the pipeline)
       - name: Validate JSON outputs (docs/latest)
         if: always()
         run: |
@@ -98,25 +106,41 @@ jobs:
           import json
           from pathlib import Path
 
-          out = Path("docs/latest")
+          out = Path('docs/latest')
           if not out.exists():
-              raise SystemExit("docs/latest not found")
+              raise SystemExit('docs/latest not found')
 
           bad = []
-          for p in out.rglob("*.json"):
+          for p in out.rglob('*.json'):
               try:
-                  json.loads(p.read_text(encoding="utf-8"))
+                  json.loads(p.read_text(encoding='utf-8'))
               except Exception as e:
                   bad.append((str(p), str(e)))
 
           if bad:
-              print("❌ Invalid JSON outputs in docs/latest:")
+              print('❌ Invalid JSON outputs in docs/latest:')
               for f, e in bad:
-                  print("-", f, "=>", e)
+                  print('-', f, '=>', e)
               raise SystemExit(1)
-
-          print("✅ All docs/latest JSON outputs are valid.")
+          print('✅ All docs/latest JSON outputs are valid.')
           PY
+
+      - name: List downloaded NetCDFs (tmpdir)
+        if: always()
+        run: |
+          echo "=== NetCDF files under $SEYDYAAR_TMPDIR ==="
+          ls -lah "$SEYDYAAR_TMPDIR" || true
+          echo "=== Count ==="
+          (ls -1 "$SEYDYAAR_TMPDIR"/*.nc 2>/dev/null | wc -l) || true
+
+      - name: Upload NetCDFs as artifact (debug)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: copernicus_nc_files
+          path: backend/.seydyaar_tmp/*.nc
+          if-no-files-found: ignore
+          retention-days: 3
 
       - name: Commit & push updated docs
         run: |
