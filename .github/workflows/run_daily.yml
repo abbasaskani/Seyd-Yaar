@@ -13,18 +13,25 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      # Reduce Copernicus toolbox verbosity
       COPERNICUSMARINE_LOG_LEVEL: WARNING
 
-      # Copernicus Marine Toolbox expected names
+      # Credentials (toolbox standard names)
       COPERNICUSMARINE_SERVICE_USERNAME: ${{ secrets.COPERNICUSMARINE_SERVICE_USERNAME }}
       COPERNICUSMARINE_SERVICE_PASSWORD: ${{ secrets.COPERNICUSMARINE_SERVICE_PASSWORD }}
 
-      # Your project expected names (alias)
+      # Credentials (project alias names)
       COPERNICUS_MARINE_USERNAME: ${{ secrets.COPERNICUSMARINE_SERVICE_USERNAME }}
       COPERNICUS_MARINE_PASSWORD: ${{ secrets.COPERNICUSMARINE_SERVICE_PASSWORD }}
 
-      # Force overwrite of existing outputs (set to "1" only when you want a full rebuild)
+      # STRICT: do not allow synthetic fallback
+      SEYDYAAR_STRICT_COPERNICUS: "1"
+
+      # Where to save downloaded .nc during the run (relative to backend/ because we cd backend in many setups)
+      SEYDYAAR_TMPDIR: ".seydyaar_tmp"
+      # Where to write manifests (these will be committed because they're under docs/latest)
+      SEYDYAAR_LOG_DIR: "docs/latest/logs"
+
+      # Incremental by default (set to 1 only when you want full rebuild)
       SEYDYAAR_FORCE_REGEN: "0"
 
       PYTHONUNBUFFERED: "1"
