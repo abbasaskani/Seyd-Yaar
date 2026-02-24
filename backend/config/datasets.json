@@ -26,7 +26,7 @@
     },
     "ssh": {
       "dataset_id": "cmems_mod_glo_phy_anfc_merged-sl_PT1H-i",
-      "variable": "zos",
+      "variable": "variable": "sea_surface_height",
       "units": "m",
       "convert": null,
       "notes": "Sea level, hourly. Variable typically 'zos' (sea surface height)."
