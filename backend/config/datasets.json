@@ -22,11 +22,11 @@
       "convert": null
     },
     "ssh": {
-      "dataset_id": "c3s_obs-sl_glo_phy-ssh_my_twosat-l4-duacs-0.25deg_P1D",
-      "variable": "sla",
-      "units": "m",
-      "convert": null,
-      "notes": "Uses SLA as SSH proxy for fronting/gradients. Daily cadence; nearest-time logic applies."
+    "dataset_id": "cmems_mod_glo_phy_anfc_merged-sl_PT1H-i",
+    "variable": "zos",
+    "units": "m",
+    "convert": null,
+    "notes": "Sea level, hourly dataset from GLOBAL_ANALYSISFORECAST_PHY_001_024 services. Covers into Mar 2026."
     },
     "waves": {
       "dataset_id": "cmems_mod_glo_wav_anfc_0.083deg_PT3H-i",
