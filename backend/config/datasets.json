@@ -1,5 +1,5 @@
 {
-  "notes": "Dataset IDs sourced from provided Copernicus catalogue exports. SSH uses DUACS SLA (meters). CHL uses NRT gapfree L4 daily (mg m-3). SST uses global physics thetao (degC).",
+  "notes": "Updated: SSH/Sea level comes from GLOBAL_ANALYSISFORECAST_PHY_001_024 hourly sea-level dataset (covers into Mar 2026). This avoids DUACS L4 MY time limit. SST/thetao, currents/uo+vo, waves/VHM0, CHL as before.",
   "cmems": {
     "sst": {
       "dataset_id": "cmems_mod_glo_phy-thetao_anfc_0.083deg_PT6H-i",
@@ -16,17 +16,20 @@
     },
     "currents": {
       "dataset_id": "cmems_mod_glo_phy-cur_anfc_0.083deg_PT6H-i",
-      "variables": ["uo", "vo"],
+      "variables": [
+        "uo",
+        "vo"
+      ],
       "depth_m": 0,
       "units": "m s-1",
       "convert": null
     },
     "ssh": {
-    "dataset_id": "cmems_mod_glo_phy_anfc_merged-sl_PT1H-i",
-    "variable": "zos",
-    "units": "m",
-    "convert": null,
-    "notes": "Sea level, hourly dataset from GLOBAL_ANALYSISFORECAST_PHY_001_024 services. Covers into Mar 2026."
+      "dataset_id": "cmems_mod_glo_phy_anfc_merged-sl_PT1H-i",
+      "variable": "zos",
+      "units": "m",
+      "convert": null,
+      "notes": "Sea level, hourly. Variable typically 'zos' (sea surface height)."
     },
     "waves": {
       "dataset_id": "cmems_mod_glo_wav_anfc_0.083deg_PT3H-i",
@@ -39,7 +42,7 @@
       "variable": "analysed_sst",
       "units": "kelvin",
       "convert": "K_TO_C",
-      "notes": "Optional alternative SST source (OSTIA). If you switch to this source, the code will convert Kelvin -> Celsius."
+      "notes": "Optional alternative SST source (OSTIA). Code converts Kelvin -> Celsius if used."
     }
   }
 }
