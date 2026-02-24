@@ -1,5 +1,5 @@
 {
-  "notes": "Copernicus Marine dataset IDs for Seyd‑Yaar (validated against CMEMS product user manuals). Physics uses the hourly surface dataset; BGC uses PFT dataset for chlorophyll; Waves uses global wave forecast dataset.",
+  "notes": "Copernicus Marine dataset IDs for Seyd\u2011Yaar (validated against CMEMS product user manuals). Physics uses the hourly surface dataset; BGC uses PFT dataset for chlorophyll; Waves uses global wave forecast dataset.",
   "cmems": {
     "sst": {
       "product": "GLOBAL_ANALYSISFORECAST_PHY_001_024",
@@ -10,7 +10,10 @@
     "currents": {
       "product": "GLOBAL_ANALYSISFORECAST_PHY_001_024",
       "dataset_id": "cmems_mod_glo_phy_anfc_0.083deg_PT1H-m",
-      "variables": ["uo", "vo"],
+      "variables": [
+        "uo",
+        "vo"
+      ],
       "units": "m s-1"
     },
     "ssh": {
@@ -23,7 +26,7 @@
       "product": "GLOBAL_ANALYSISFORECAST_BGC_001_028",
       "dataset_id": "cmems_mod_glo_bgc-pft_anfc_0.25deg_P1D-m",
       "variable": "chl",
-      "depth_m": 0,
+      "depth_m": 0.4940253794,
       "units": "mg m-3"
     },
     "waves": {
