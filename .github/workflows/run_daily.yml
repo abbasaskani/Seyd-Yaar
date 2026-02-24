@@ -26,8 +26,9 @@ jobs:
       # STRICT: do not allow synthetic fallback
       SEYDYAAR_STRICT_COPERNICUS: "1"
 
-      # Where to save downloaded .nc during the run (relative to backend/ because we cd backend in many setups)
-      SEYDYAAR_TMPDIR: ".seydyaar_tmp"
+      # Where to save downloaded .nc during the run
+      SEYDYAAR_TMPDIR: "backend/.seydyaar_tmp"
+
       # Where to write manifests (these will be committed because they're under docs/latest)
       SEYDYAAR_LOG_DIR: "docs/latest/logs"
 
@@ -52,10 +53,41 @@ jobs:
           pip install -U copernicusmarine
           pip install h5py netCDF4
 
+      # ✅ مهم: قبل از اجرا، دقیقاً بگو datasets.json چی می‌گه (برای اینکه مطمئن شی zos نیست)
+      - name: Debug datasets.json (ssh config)
+        run: |
+          python - << 'PY'
+          import json
+          p = "backend/config/datasets.json"
+          cfg = json.load(open(p, "r", encoding="utf-8"))
+          cm = cfg.get("cmems", cfg)
+          print("ssh.dataset_id =", cm["ssh"]["dataset_id"])
+          print("ssh.variable   =", cm["ssh"]["variable"])
+          PY
+
       - name: Run pipeline (writes docs/latest)
         run: |
           export PYTHONPATH="$GITHUB_WORKSPACE/backend"
           python -m seydyaar run-daily --out docs/latest --past-days 2 --future-days 10 --step-hours 6 --grid 220x220
+
+      # ✅ شفافیت: ببین دقیقاً چه .nc هایی ساخته شده
+      - name: List downloaded NetCDFs (tmpdir)
+        if: always()
+        run: |
+          echo "=== NetCDF files under backend/.seydyaar_tmp ==="
+          ls -lah backend/.seydyaar_tmp || true
+          echo "=== Count ==="
+          (ls -1 backend/.seydyaar_tmp/*.nc 2>/dev/null | wc -l) || true
+
+      # ✅ (اختیاری) اگر می‌خوای nc ها رو هم از صفحه Actions دانلود کنی، این روشن باشه
+      - name: Upload NetCDFs as artifact (optional)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: copernicus_nc_files
+          path: backend/.seydyaar_tmp/*.nc
+          if-no-files-found: ignore
+          retention-days: 3
 
       - name: Commit & push updated docs
         run: |
