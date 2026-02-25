@@ -1,4 +1,4 @@
-name: Run daily + publish docs (auto-cap future, robust)
+name: Run daily + publish docs (rewrite + verify, v4)
 
 on:
   workflow_dispatch:
@@ -11,7 +11,6 @@ permissions:
 jobs:
   run:
     runs-on: ubuntu-latest
-
     env:
       COPERNICUSMARINE_LOG_LEVEL: INFO
       COPERNICUSMARINE_SERVICE_USERNAME: ${{ secrets.COPERNICUSMARINE_SERVICE_USERNAME }}
@@ -21,15 +20,18 @@ jobs:
       COPERNICUS_MARINE_PASSWORD: ${{ secrets.COPERNICUSMARINE_SERVICE_PASSWORD }}
 
       SEYDYAAR_STRICT_COPERNICUS: "1"
+      SEYDYAAR_REWRITE: "1"
+
       SEYDYAAR_TMPDIR: "backend/.seydyaar_tmp"
       SEYDYAAR_LOG_DIR: "docs/latest/logs"
       SEYDYAAR_VERIFY_DIR: "docs/latest/verify"
-      PYTHONUNBUFFERED: "1"
 
       SEYDYAAR_PAST_DAYS: "2"
-      SEYDYAAR_FUTURE_DAYS: "10"
+      SEYDYAAR_FUTURE_DAYS: "8"
       SEYDYAAR_STEP_HOURS: "6"
       SEYDYAAR_GRID: "220x220"
+
+      PYTHONUNBUFFERED: "1"
 
     steps:
       - name: Checkout
@@ -46,99 +48,28 @@ jobs:
           pip install -r backend/requirements.txt
           pip install -U copernicusmarine
 
-      # ✅ Auto-cap FUTURE_DAYS to the minimum max-time across datasets (robust JSON parsing)
-      # We rely on copernicusmarine 'describe' and parse ANY nested 'maximum_value' we can find.
-      - name: Auto-cap future-days from dataset max time (robust)
-        shell: bash
+      - name: Clean previous outputs (rewrite)
         run: |
-          set -euo pipefail
-          mkdir -p /tmp/cmems_meta
+          rm -rf docs/latest/runs/main || true
+          rm -rf docs/latest/verify || true
+          rm -rf docs/latest/logs || true
+          mkdir -p docs/latest/logs docs/latest/verify
 
-          DS_PHY="cmems_mod_glo_phy-thetao_anfc_0.083deg_PT6H-i"
-          DS_CUR="cmems_mod_glo_phy-cur_anfc_0.083deg_PT6H-i"
-          DS_SSH="cmems_mod_glo_phy_anfc_0.083deg_PT1H-m"
-          DS_WAV="cmems_mod_glo_wav_anfc_0.083deg_PT3H-i"
-          DS_CHL="cmems_mod_glo_bgc-pft_anfc_0.25deg_P1D-m"
-
-          copernicusmarine describe --dataset-id "$DS_PHY" -c time -r coordinates > /tmp/cmems_meta/phy_time.json
-          copernicusmarine describe --dataset-id "$DS_CUR" -c time -r coordinates > /tmp/cmems_meta/cur_time.json
-          copernicusmarine describe --dataset-id "$DS_SSH" -c time -r coordinates > /tmp/cmems_meta/ssh_time.json
-          copernicusmarine describe --dataset-id "$DS_WAV" -c time -r coordinates > /tmp/cmems_meta/wav_time.json
-          copernicusmarine describe --dataset-id "$DS_CHL" -c time -r coordinates > /tmp/cmems_meta/chl_time.json
-
-          python - << 'PY'
-          import json, os
-          from datetime import datetime, timezone
-          from pathlib import Path
-
-          def parse_dt(x):
-              if x is None:
-                  return None
-              if isinstance(x, (int, float)):
-                  return datetime.fromtimestamp(float(x)/1000, tz=timezone.utc)
-              s = str(x).strip()
-              if s.replace(".","",1).isdigit():
-                  return datetime.fromtimestamp(float(s)/1000, tz=timezone.utc)
-              s = s.replace("Z", "+00:00")
-              try:
-                  return datetime.fromisoformat(s)
-              except Exception:
-                  return None
-
-          def walk(obj):
-              if isinstance(obj, dict):
-                  for k, v in obj.items():
-                      if k == "maximum_value":
-                          yield v
-                      yield from walk(v)
-              elif isinstance(obj, list):
-                  for it in obj:
-                      yield from walk(it)
-
-          def best_max_time(p: Path) -> datetime:
-              data = json.loads(p.read_text())
-              candidates = []
-              for v in walk(data):
-                  dt = parse_dt(v)
-                  if dt is not None:
-                      candidates.append(dt)
-              if not candidates:
-                  preview = json.dumps(data)[:800]
-                  raise RuntimeError(f"Could not find parseable maximum_value in {p.name}. Preview: {preview}")
-              return max(candidates)
-
-          files = sorted(Path('/tmp/cmems_meta').glob('*_time.json'))
-          max_times = []
-          for f in files:
-              mt = best_max_time(f)
-              max_times.append((f.name, mt))
-
-          limiting_name, limiting_max = min(max_times, key=lambda x: x[1])
-
-          now = datetime.now(timezone.utc)
-          today00 = now.replace(hour=0, minute=0, second=0, microsecond=0)
-          delta_days = int((limiting_max - today00).total_seconds() // 86400)
-
-          future_days = max(0, min(10, delta_days))
-
-          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as fp:
-              fp.write(f"SEYDYAAR_FUTURE_DAYS={future_days}\n")
-              fp.write(f"SEYDYAAR_LIMITING_DATASET_TIMEFILE={limiting_name}\n")
-              fp.write(f"SEYDYAAR_LIMITING_MAX_TIME={limiting_max.isoformat()}\n")
-
-          print("Limiting dataset time file:", limiting_name)
-          print("Limiting max time UTC:", limiting_max.isoformat())
-          print("Computed future_days:", future_days)
-          PY
-
-      - name: Run pipeline (writes docs/latest)
+      - name: Run pipeline
         shell: bash
         run: |
           set -euo pipefail
           export PYTHONPATH="$GITHUB_WORKSPACE/backend"
-          echo "Using SEYDYAAR_FUTURE_DAYS=$SEYDYAAR_FUTURE_DAYS (limiting_max_time=$SEYDYAAR_LIMITING_MAX_TIME via $SEYDYAAR_LIMITING_DATASET_TIMEFILE)"
-
           python -m seydyaar run-daily             --out docs/latest             --past-days "$SEYDYAAR_PAST_DAYS"             --future-days "$SEYDYAAR_FUTURE_DAYS"             --step-hours "$SEYDYAAR_STEP_HOURS"             --grid "$SEYDYAAR_GRID"
+
+      - name: Assert manifest & verify exist
+        if: always()
+        run: |
+          echo "== logs =="
+          ls -lah docs/latest/logs || true
+          test -f docs/latest/logs/download_manifest.jsonl
+          echo "== verify =="
+          find docs/latest/verify -maxdepth 3 -type f -print || true
 
       - name: Upload verify + logs as artifact
         if: always()
@@ -148,7 +79,7 @@ jobs:
           path: |
             docs/latest/logs/**
             docs/latest/verify/**
-          if-no-files-found: ignore
+          if-no-files-found: error
           retention-days: 7
 
       - name: Commit & push updated docs
