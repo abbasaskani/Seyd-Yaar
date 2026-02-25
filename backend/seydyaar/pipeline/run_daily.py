@@ -201,8 +201,17 @@ def _subset_one(
         return None, str(e)
 
 
-def run_daily(out_dir: str, past_days: int = 2, future_days: int = 8, step_hours: int = 6, grid: str = "220x220") -> None:
-    out_root = Path(out_dir)
+def run_daily(*, out_root: str = None, out_dir: str = None, past_days: int = 2, future_days: int = 8, step_hours: int = 6, grid: str = "220x220", **_ignored_kwargs) -> None:
+    """Entry point compatible with backend/seydyaar/__main__.py.
+    Accepts either out_root=... (preferred by current CLI) or out_dir=... (legacy).
+    Any extra kwargs are ignored safely.
+    """
+    if out_root is None and out_dir is None:
+        raise TypeError("run_daily requires out_root or out_dir")
+    if out_root is None:
+        out_root = out_dir
+
+    out_root = Path(out_root)
     _ensure_dir(out_root)
 
     # Rewrite old bad outputs if requested
