@@ -1,4 +1,4 @@
-name: Run daily + publish docs (auto-cap future)
+name: Run daily + publish docs (auto-cap future, robust)
 
 on:
   workflow_dispatch:
@@ -26,7 +26,6 @@ jobs:
       SEYDYAAR_VERIFY_DIR: "docs/latest/verify"
       PYTHONUNBUFFERED: "1"
 
-      # Defaults (will be overwritten by the auto-cap step)
       SEYDYAAR_PAST_DAYS: "2"
       SEYDYAAR_FUTURE_DAYS: "10"
       SEYDYAAR_STEP_HOURS: "6"
@@ -47,86 +46,82 @@ jobs:
           pip install -r backend/requirements.txt
           pip install -U copernicusmarine
 
-      # ✅ Auto-cap FUTURE_DAYS to the minimum max-time across key datasets.
-      # This avoids hard failures like: "requested time exceed dataset coordinates".
-      - name: Auto-cap future-days from dataset max time (min across datasets)
+      # ✅ Auto-cap FUTURE_DAYS to the minimum max-time across datasets (robust JSON parsing)
+      # We rely on copernicusmarine 'describe' and parse ANY nested 'maximum_value' we can find.
+      - name: Auto-cap future-days from dataset max time (robust)
         shell: bash
         run: |
           set -euo pipefail
-
           mkdir -p /tmp/cmems_meta
 
-          # Key datasets used by the pipeline (update if you change datasets.json)
           DS_PHY="cmems_mod_glo_phy-thetao_anfc_0.083deg_PT6H-i"
           DS_CUR="cmems_mod_glo_phy-cur_anfc_0.083deg_PT6H-i"
           DS_SSH="cmems_mod_glo_phy_anfc_0.083deg_PT1H-m"
           DS_WAV="cmems_mod_glo_wav_anfc_0.083deg_PT3H-i"
           DS_CHL="cmems_mod_glo_bgc-pft_anfc_0.25deg_P1D-m"
 
-          # Pull min/max time coverage for each dataset (JSON output).
-          copernicusmarine describe --dataset-id "$DS_PHY" -c time --return-fields coordinates,maximum_value,minimum_value > /tmp/cmems_meta/phy_time.json
-          copernicusmarine describe --dataset-id "$DS_CUR" -c time --return-fields coordinates,maximum_value,minimum_value > /tmp/cmems_meta/cur_time.json
-          copernicusmarine describe --dataset-id "$DS_SSH" -c time --return-fields coordinates,maximum_value,minimum_value > /tmp/cmems_meta/ssh_time.json
-          copernicusmarine describe --dataset-id "$DS_WAV" -c time --return-fields coordinates,maximum_value,minimum_value > /tmp/cmems_meta/wav_time.json
-          copernicusmarine describe --dataset-id "$DS_CHL" -c time --return-fields coordinates,maximum_value,minimum_value > /tmp/cmems_meta/chl_time.json
+          copernicusmarine describe --dataset-id "$DS_PHY" -c time -r coordinates > /tmp/cmems_meta/phy_time.json
+          copernicusmarine describe --dataset-id "$DS_CUR" -c time -r coordinates > /tmp/cmems_meta/cur_time.json
+          copernicusmarine describe --dataset-id "$DS_SSH" -c time -r coordinates > /tmp/cmems_meta/ssh_time.json
+          copernicusmarine describe --dataset-id "$DS_WAV" -c time -r coordinates > /tmp/cmems_meta/wav_time.json
+          copernicusmarine describe --dataset-id "$DS_CHL" -c time -r coordinates > /tmp/cmems_meta/chl_time.json
 
           python - << 'PY'
-          import json
+          import json, os
           from datetime import datetime, timezone
           from pathlib import Path
 
           def parse_dt(x):
-              # x may be ISO string or milliseconds as string/float
               if x is None:
                   return None
               if isinstance(x, (int, float)):
                   return datetime.fromtimestamp(float(x)/1000, tz=timezone.utc)
-              s = str(x)
+              s = str(x).strip()
               if s.replace(".","",1).isdigit():
                   return datetime.fromtimestamp(float(s)/1000, tz=timezone.utc)
-              # ISO
               s = s.replace("Z", "+00:00")
-              return datetime.fromisoformat(s)
+              try:
+                  return datetime.fromisoformat(s)
+              except Exception:
+                  return None
 
-          def get_max_time(p: Path):
+          def walk(obj):
+              if isinstance(obj, dict):
+                  for k, v in obj.items():
+                      if k == "maximum_value":
+                          yield v
+                      yield from walk(v)
+              elif isinstance(obj, list):
+                  for it in obj:
+                      yield from walk(it)
+
+          def best_max_time(p: Path) -> datetime:
               data = json.loads(p.read_text())
-              # The help-center example shows coordinates[].maximum_value/minimum_value.
-              # We take the first coordinate block (time) that includes maximum_value.
-              coords = data.get("coordinates") or []
-              maxv = None
-              for c in coords:
-                  if "maximum_value" in c:
-                      maxv = c["maximum_value"]
-                      break
-              if maxv is None and coords:
-                  maxv = coords[0].get("maximum_value")
-              return parse_dt(maxv)
+              candidates = []
+              for v in walk(data):
+                  dt = parse_dt(v)
+                  if dt is not None:
+                      candidates.append(dt)
+              if not candidates:
+                  preview = json.dumps(data)[:800]
+                  raise RuntimeError(f"Could not find parseable maximum_value in {p.name}. Preview: {preview}")
+              return max(candidates)
 
-          files = list(Path("/tmp/cmems_meta").glob("*_time.json"))
+          files = sorted(Path('/tmp/cmems_meta').glob('*_time.json'))
           max_times = []
           for f in files:
-              mt = get_max_time(f)
-              if mt is None:
-                  raise SystemExit(f"Could not read maximum_value from {f}")
+              mt = best_max_time(f)
               max_times.append((f.name, mt))
 
-          # Take the minimum max-time across datasets, so ALL layers can be downloaded for that time range.
-          limiting = min(max_times, key=lambda x: x[1])
-          limiting_name, limiting_max = limiting
+          limiting_name, limiting_max = min(max_times, key=lambda x: x[1])
 
           now = datetime.now(timezone.utc)
-          # We want number of FULL days from today's 00:00Z to limiting_max (inclusive-ish).
           today00 = now.replace(hour=0, minute=0, second=0, microsecond=0)
           delta_days = int((limiting_max - today00).total_seconds() // 86400)
 
-          # Clamp to [0, 10]
           future_days = max(0, min(10, delta_days))
 
-          # Write to GITHUB_ENV
-          env_path = Path(Path.cwd(), Path(Path(__import__("os").environ["GITHUB_ENV"]).name))
-          # Above path handling not needed; just write to GITHUB_ENV directly.
-          import os
-          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as fp:
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as fp:
               fp.write(f"SEYDYAAR_FUTURE_DAYS={future_days}\n")
               fp.write(f"SEYDYAAR_LIMITING_DATASET_TIMEFILE={limiting_name}\n")
               fp.write(f"SEYDYAAR_LIMITING_MAX_TIME={limiting_max.isoformat()}\n")
