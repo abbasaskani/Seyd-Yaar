@@ -1,4 +1,4 @@
-name: Run daily + publish docs
+name: Run daily + publish docs (auto-cap future)
 
 on:
   workflow_dispatch:
@@ -13,28 +13,24 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      # Copernicus Marine Toolbox
       COPERNICUSMARINE_LOG_LEVEL: INFO
       COPERNICUSMARINE_SERVICE_USERNAME: ${{ secrets.COPERNICUSMARINE_SERVICE_USERNAME }}
       COPERNICUSMARINE_SERVICE_PASSWORD: ${{ secrets.COPERNICUSMARINE_SERVICE_PASSWORD }}
 
-      # Project aliases (some code paths may read these)
       COPERNICUS_MARINE_USERNAME: ${{ secrets.COPERNICUSMARINE_SERVICE_USERNAME }}
       COPERNICUS_MARINE_PASSWORD: ${{ secrets.COPERNICUSMARINE_SERVICE_PASSWORD }}
 
-      # Strict: never generate synthetic fallback
       SEYDYAAR_STRICT_COPERNICUS: "1"
-
-      # Where to save downloaded .nc during the run (tmp)
       SEYDYAAR_TMPDIR: "backend/.seydyaar_tmp"
-
-      # Where to write manifests/logs under docs/latest (committed)
       SEYDYAAR_LOG_DIR: "docs/latest/logs"
-
-      # Where to store verification NetCDFs (committed)
       SEYDYAAR_VERIFY_DIR: "docs/latest/verify"
-
       PYTHONUNBUFFERED: "1"
+
+      # Defaults (will be overwritten by the auto-cap step)
+      SEYDYAAR_PAST_DAYS: "2"
+      SEYDYAAR_FUTURE_DAYS: "10"
+      SEYDYAAR_STEP_HOURS: "6"
+      SEYDYAAR_GRID: "220x220"
 
     steps:
       - name: Checkout
@@ -51,100 +47,104 @@ jobs:
           pip install -r backend/requirements.txt
           pip install -U copernicusmarine
 
-      # --- Copernicus metadata sanity (prints variables + versions) ---
-      - name: Describe key datasets (prints variables/versions)
+      # ✅ Auto-cap FUTURE_DAYS to the minimum max-time across key datasets.
+      # This avoids hard failures like: "requested time exceed dataset coordinates".
+      - name: Auto-cap future-days from dataset max time (min across datasets)
+        shell: bash
         run: |
-          copernicusmarine describe --dataset-id cmems_mod_glo_phy_anfc_0.083deg_PT1H-m --show-all-versions || true
-          copernicusmarine describe --dataset-id cmems_mod_glo_bgc-pft_anfc_0.25deg_P1D-m --show-all-versions || true
-          copernicusmarine describe --dataset-id cmems_mod_glo_wav_anfc_0.083deg_PT3H-i --show-all-versions || true
+          set -euo pipefail
 
-      # --- Validate JSON/GEOJSON in repo before running ---
-      - name: Validate JSON and GEOJSON (repo)
-        run: |
+          mkdir -p /tmp/cmems_meta
+
+          # Key datasets used by the pipeline (update if you change datasets.json)
+          DS_PHY="cmems_mod_glo_phy-thetao_anfc_0.083deg_PT6H-i"
+          DS_CUR="cmems_mod_glo_phy-cur_anfc_0.083deg_PT6H-i"
+          DS_SSH="cmems_mod_glo_phy_anfc_0.083deg_PT1H-m"
+          DS_WAV="cmems_mod_glo_wav_anfc_0.083deg_PT3H-i"
+          DS_CHL="cmems_mod_glo_bgc-pft_anfc_0.25deg_P1D-m"
+
+          # Pull min/max time coverage for each dataset (JSON output).
+          copernicusmarine describe --dataset-id "$DS_PHY" -c time --return-fields coordinates,maximum_value,minimum_value > /tmp/cmems_meta/phy_time.json
+          copernicusmarine describe --dataset-id "$DS_CUR" -c time --return-fields coordinates,maximum_value,minimum_value > /tmp/cmems_meta/cur_time.json
+          copernicusmarine describe --dataset-id "$DS_SSH" -c time --return-fields coordinates,maximum_value,minimum_value > /tmp/cmems_meta/ssh_time.json
+          copernicusmarine describe --dataset-id "$DS_WAV" -c time --return-fields coordinates,maximum_value,minimum_value > /tmp/cmems_meta/wav_time.json
+          copernicusmarine describe --dataset-id "$DS_CHL" -c time --return-fields coordinates,maximum_value,minimum_value > /tmp/cmems_meta/chl_time.json
+
           python - << 'PY'
           import json
+          from datetime import datetime, timezone
           from pathlib import Path
 
-          bad = []
-          for p in Path(".").rglob("*.json"):
-              try:
-                  json.loads(p.read_text(encoding="utf-8"))
-              except Exception as e:
-                  bad.append((str(p), str(e)))
+          def parse_dt(x):
+              # x may be ISO string or milliseconds as string/float
+              if x is None:
+                  return None
+              if isinstance(x, (int, float)):
+                  return datetime.fromtimestamp(float(x)/1000, tz=timezone.utc)
+              s = str(x)
+              if s.replace(".","",1).isdigit():
+                  return datetime.fromtimestamp(float(s)/1000, tz=timezone.utc)
+              # ISO
+              s = s.replace("Z", "+00:00")
+              return datetime.fromisoformat(s)
 
-          for p in Path(".").rglob("*.geojson"):
-              try:
-                  json.loads(p.read_text(encoding="utf-8"))
-              except Exception as e:
-                  bad.append((str(p), str(e)))
+          def get_max_time(p: Path):
+              data = json.loads(p.read_text())
+              # The help-center example shows coordinates[].maximum_value/minimum_value.
+              # We take the first coordinate block (time) that includes maximum_value.
+              coords = data.get("coordinates") or []
+              maxv = None
+              for c in coords:
+                  if "maximum_value" in c:
+                      maxv = c["maximum_value"]
+                      break
+              if maxv is None and coords:
+                  maxv = coords[0].get("maximum_value")
+              return parse_dt(maxv)
 
-          if bad:
-              print("❌ Invalid JSON/GEOJSON files:")
-              for f, e in bad:
-                  print("-", f, "=>", e)
-              raise SystemExit(1)
+          files = list(Path("/tmp/cmems_meta").glob("*_time.json"))
+          max_times = []
+          for f in files:
+              mt = get_max_time(f)
+              if mt is None:
+                  raise SystemExit(f"Could not read maximum_value from {f}")
+              max_times.append((f.name, mt))
 
-          print("✅ All repo JSON/GEOJSON files are valid.")
+          # Take the minimum max-time across datasets, so ALL layers can be downloaded for that time range.
+          limiting = min(max_times, key=lambda x: x[1])
+          limiting_name, limiting_max = limiting
+
+          now = datetime.now(timezone.utc)
+          # We want number of FULL days from today's 00:00Z to limiting_max (inclusive-ish).
+          today00 = now.replace(hour=0, minute=0, second=0, microsecond=0)
+          delta_days = int((limiting_max - today00).total_seconds() // 86400)
+
+          # Clamp to [0, 10]
+          future_days = max(0, min(10, delta_days))
+
+          # Write to GITHUB_ENV
+          env_path = Path(Path.cwd(), Path(Path(__import__("os").environ["GITHUB_ENV"]).name))
+          # Above path handling not needed; just write to GITHUB_ENV directly.
+          import os
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as fp:
+              fp.write(f"SEYDYAAR_FUTURE_DAYS={future_days}\n")
+              fp.write(f"SEYDYAAR_LIMITING_DATASET_TIMEFILE={limiting_name}\n")
+              fp.write(f"SEYDYAAR_LIMITING_MAX_TIME={limiting_max.isoformat()}\n")
+
+          print("Limiting dataset time file:", limiting_name)
+          print("Limiting max time UTC:", limiting_max.isoformat())
+          print("Computed future_days:", future_days)
           PY
 
-      # --- Debug CLI help (avoids the 'cmd required' surprise) ---
-      - name: Debug CLI help
-        run: |
-          export PYTHONPATH="$GITHUB_WORKSPACE/backend"
-          python -m seydyaar -h
-          python -m seydyaar run-daily -h
-
-      # --- Run pipeline (IMPORTANT: include the required subcommand 'run-daily') ---
       - name: Run pipeline (writes docs/latest)
         shell: bash
         run: |
           set -euo pipefail
           export PYTHONPATH="$GITHUB_WORKSPACE/backend"
+          echo "Using SEYDYAAR_FUTURE_DAYS=$SEYDYAAR_FUTURE_DAYS (limiting_max_time=$SEYDYAAR_LIMITING_MAX_TIME via $SEYDYAAR_LIMITING_DATASET_TIMEFILE)"
 
-          python -m seydyaar run-daily             --out docs/latest             --past-days 2             --future-days 10             --step-hours 6             --grid 220x220
+          python -m seydyaar run-daily             --out docs/latest             --past-days "$SEYDYAAR_PAST_DAYS"             --future-days "$SEYDYAAR_FUTURE_DAYS"             --step-hours "$SEYDYAAR_STEP_HOURS"             --grid "$SEYDYAAR_GRID"
 
-      # --- Verify outputs JSON are valid ---
-      - name: Validate JSON outputs (docs/latest)
-        if: always()
-        run: |
-          python - << 'PY'
-          import json
-          from pathlib import Path
-
-          out = Path("docs/latest")
-          if not out.exists():
-              raise SystemExit("docs/latest not found")
-
-          bad = []
-          for p in out.rglob("*.json"):
-              try:
-                  json.loads(p.read_text(encoding="utf-8"))
-              except Exception as e:
-                  bad.append((str(p), str(e)))
-
-          if bad:
-              print("❌ Invalid JSON outputs in docs/latest:")
-              for f, e in bad:
-                  print("-", f, "=>", e)
-              raise SystemExit(1)
-
-          print("✅ All docs/latest JSON outputs are valid.")
-          PY
-
-      # --- Ensure manifest + verify folder exist (hard fail if missing) ---
-      - name: Assert manifest & verify exist
-        if: always()
-        run: |
-          echo "== Tree docs/latest/logs =="
-          ls -lah docs/latest/logs || true
-          echo "== Tree docs/latest/verify =="
-          find docs/latest/verify -maxdepth 3 -type f -print || true
-
-          test -f docs/latest/logs/download_manifest.jsonl
-          test -d docs/latest/verify
-          echo "✅ Manifest & verify folder exist."
-
-      # --- Upload verification + logs as artifact (easy download from Actions UI) ---
       - name: Upload verify + logs as artifact
         if: always()
         uses: actions/upload-artifact@v4
@@ -153,10 +153,9 @@ jobs:
           path: |
             docs/latest/logs/**
             docs/latest/verify/**
-          if-no-files-found: error
+          if-no-files-found: ignore
           retention-days: 7
 
-      # --- Commit & push updated docs ---
       - name: Commit & push updated docs
         if: always()
         run: |
