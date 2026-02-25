@@ -1,11 +1,19 @@
 {
-  "notes": "Copernicus Marine dataset IDs for Seyd\u2011Yaar (validated against CMEMS product user manuals). Physics uses the hourly surface dataset; BGC uses PFT dataset for chlorophyll; Waves uses global wave forecast dataset.",
+  "notes": "Dataset IDs aligned to Copernicus Marine products (GLOBAL_ANALYSISFORECAST_PHY_001_024, GLOBAL_ANALYSISFORECAST_BGC_001_028, GLOBAL_ANALYSISFORECAST_WAV_001_027). Physics uses the surface hourly dataset with variables thetao/uo/vo/zos at depth ~0.494 m. CHL uses global BGC forecast daily. Waves use global wave forecast 3-hourly.",
   "cmems": {
     "sst": {
       "product": "GLOBAL_ANALYSISFORECAST_PHY_001_024",
       "dataset_id": "cmems_mod_glo_phy_anfc_0.083deg_PT1H-m",
       "variable": "thetao",
+      "depth_m": 0.494025,
       "units": "degrees_C"
+    },
+    "chl": {
+      "product": "GLOBAL_ANALYSISFORECAST_BGC_001_028",
+      "dataset_id": "cmems_mod_glo_bgc-pft_anfc_0.25deg_P1D-m",
+      "variable": "chl",
+      "depth_m": 0.4940253794,
+      "units": "mg m-3"
     },
     "currents": {
       "product": "GLOBAL_ANALYSISFORECAST_PHY_001_024",
@@ -14,20 +22,15 @@
         "uo",
         "vo"
       ],
+      "depth_m": 0.494025,
       "units": "m s-1"
     },
     "ssh": {
       "product": "GLOBAL_ANALYSISFORECAST_PHY_001_024",
       "dataset_id": "cmems_mod_glo_phy_anfc_0.083deg_PT1H-m",
       "variable": "zos",
+      "depth_m": 0.494025,
       "units": "m"
-    },
-    "chl": {
-      "product": "GLOBAL_ANALYSISFORECAST_BGC_001_028",
-      "dataset_id": "cmems_mod_glo_bgc-pft_anfc_0.25deg_P1D-m",
-      "variable": "chl",
-      "depth_m": 0.4940253794,
-      "units": "mg m-3"
     },
     "waves": {
       "product": "GLOBAL_ANALYSISFORECAST_WAV_001_027",
