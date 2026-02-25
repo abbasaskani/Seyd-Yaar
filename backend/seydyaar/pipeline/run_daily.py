@@ -235,11 +235,12 @@ def _try_copernicus_layers(
                 depth_target = cfg.get("depth_target_m", cfg.get("depth_m", None))
                 min_depth = max_depth = None
                 if depth_target is not None:
+                    # Capability discovery: if dataset exposes a depth axis, pick the depth closest to target (usually 0m).
                     try:
                         target = float(depth_target)
                         best = depth_resolver.closest_depth(dsid, target_m=target)
                         if best is not None:
-                            rec["depth_selected_m"] = best
+                            rec["depth_selected_m"] = float(best)
                             min_depth = float(best)
                             max_depth = float(best)
                     except Exception:
@@ -288,7 +289,25 @@ def _try_copernicus_layers(
         import rasterio
         with rasterio.open(f'NETCDF:"{path}":{var}') as ds:
             arr = ds.read(1).astype(np.float32)
+            nodata = ds.nodata
+        # Convert common fill/nodata to NaN, and clip absurd values (e.g., 1e20)
+        if nodata is not None:
+            arr[arr == np.float32(nodata)] = np.nan
+        arr[~np.isfinite(arr)] = np.nan
+        arr[np.abs(arr) > np.float32(1e6)] = np.nan
         return arr
+    def _resize_nearest(a: np.ndarray, target_h: int, target_w: int) -> np.ndarray:
+        """Nearest-neighbor resample to (target_h, target_w). Assumes regular lon/lat grid in the subset output."""
+        src_h, src_w = a.shape
+        if src_h == target_h and src_w == target_w:
+            return a.astype(np.float32, copy=False)
+        yi = np.rint(np.linspace(0, src_h - 1, target_h)).astype(np.int64)
+        xi = np.rint(np.linspace(0, src_w - 1, target_w)).astype(np.int64)
+        return a[np.ix_(yi, xi)].astype(np.float32, copy=False)
+
+    def _to_grid(a: np.ndarray) -> np.ndarray:
+        return _resize_nearest(a, grid.height, grid.width)
+
 
     out: Dict[str, np.ndarray] = {}
 
@@ -304,27 +323,35 @@ def _try_copernicus_layers(
             return v
 
         p = _subset_one("sst")
-        out["sst_c"] = _read_nc_var(p, _v0("sst"))
+        sst = _read_nc_var(p, _v0("sst"))
+        out["sst_c"] = _to_grid(sst)
 
         p = _subset_one("chl")
-        out["chl_mg_m3"] = _read_nc_var(p, _v0("chl"))
+        chl = _read_nc_var(p, _v0("chl"))
+        out["chl_mg_m3"] = _to_grid(chl)
 
         p = _subset_one("ssh")
-        out["ssh_m"] = _read_nc_var(p, _v0("ssh"))
+        ssh = _read_nc_var(p, _v0("ssh"))
+        out["ssh_m"] = _to_grid(ssh)
 
         p = _subset_one("currents")
         vars_uv = datasets_cfg["currents"]["variables"]
         if len(vars_uv) >= 2:
             u = _read_nc_var(p, vars_uv[0])
             v = _read_nc_var(p, vars_uv[1])
-            out["current_m_s"] = np.sqrt(u*u + v*v).astype(np.float32)
+            u = _to_grid(u)
+            v = _to_grid(v)
+            # compute in float64 to avoid overflow from occasional fill values
+            out["current_m_s"] = np.sqrt(u.astype(np.float64)**2 + v.astype(np.float64)**2).astype(np.float32)
         else:
-            out["current_m_s"] = _read_nc_var(p, vars_uv[0])
+            out["current_m_s"] = _to_grid(_read_nc_var(p, vars_uv[0]))
 
         p = _subset_one("waves")
-        out["waves_hs_m"] = _read_nc_var(p, _v0("waves"))
+        waves = _read_nc_var(p, _v0("waves"))
+        out["waves_hs_m"] = _to_grid(waves)
 
-        qc = np.ones_like(out["chl_mg_m3"], dtype=np.uint8)
+
+        qc = np.ones((grid.height, grid.width), dtype=np.uint8)
         conf = qc.astype(np.float32)
         out["qc_chl"] = qc
         out["conf"] = conf
