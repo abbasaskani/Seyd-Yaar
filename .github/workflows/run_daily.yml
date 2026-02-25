@@ -3,7 +3,7 @@ name: Run daily + publish docs
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 3 * * *" # daily 03:00 UTC
+    - cron: "0 3 * * *"  # daily 03:00 UTC
 
 permissions:
   contents: write
@@ -13,27 +13,25 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      COPERNICUSMARINE_LOG_LEVEL: WARNING
-
-      # Copernicus Marine Toolbox expected names
+      # Copernicus Marine Toolbox
+      COPERNICUSMARINE_LOG_LEVEL: INFO
       COPERNICUSMARINE_SERVICE_USERNAME: ${{ secrets.COPERNICUSMARINE_SERVICE_USERNAME }}
       COPERNICUSMARINE_SERVICE_PASSWORD: ${{ secrets.COPERNICUSMARINE_SERVICE_PASSWORD }}
 
-      # Project alias names
+      # Project aliases (some code paths may read these)
       COPERNICUS_MARINE_USERNAME: ${{ secrets.COPERNICUSMARINE_SERVICE_USERNAME }}
       COPERNICUS_MARINE_PASSWORD: ${{ secrets.COPERNICUSMARINE_SERVICE_PASSWORD }}
 
-      # Pipeline control
-      SEYDYAAR_FORCE_REGEN: "0"
-      SEYDYAAR_STRICT_COPERNICUS: "1"   # ✅ fail instead of synthetic fallback
+      # Strict: never generate synthetic fallback
+      SEYDYAAR_STRICT_COPERNICUS: "1"
 
-      # Where to save downloaded .nc during the run (temporary)
+      # Where to save downloaded .nc during the run (tmp)
       SEYDYAAR_TMPDIR: "backend/.seydyaar_tmp"
 
-      # Where to store audit logs (committed)
+      # Where to write manifests/logs under docs/latest (committed)
       SEYDYAAR_LOG_DIR: "docs/latest/logs"
 
-      # Where to store verification NetCDF snapshot (committed)
+      # Where to store verification NetCDFs (committed)
       SEYDYAAR_VERIFY_DIR: "docs/latest/verify"
 
       PYTHONUNBUFFERED: "1"
@@ -41,65 +39,126 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install backend dependencies
+      - name: Install deps
         run: |
-          python -m pip install -U pip
+          python -m pip install --upgrade pip
           pip install -r backend/requirements.txt
-          # Make sure toolbox exists (if not in requirements)
-          pip show copernicusmarine || pip install -U copernicusmarine
+          pip install -U copernicusmarine
 
-      - name: Compute verify TIME_ID (today 00:00Z)
+      # --- Copernicus metadata sanity (prints variables + versions) ---
+      - name: Describe key datasets (prints variables/versions)
         run: |
-          echo "SEYDYAAR_VERIFY_TIME_ID=$(date -u +%Y%m%d)_0000Z" >> $GITHUB_ENV
-          echo "Verify TIME_ID: $SEYDYAAR_VERIFY_TIME_ID"
+          copernicusmarine describe --dataset-id cmems_mod_glo_phy_anfc_0.083deg_PT1H-m --show-all-versions || true
+          copernicusmarine describe --dataset-id cmems_mod_glo_bgc-pft_anfc_0.25deg_P1D-m --show-all-versions || true
+          copernicusmarine describe --dataset-id cmems_mod_glo_wav_anfc_0.083deg_PT3H-i --show-all-versions || true
 
-      - name: Describe key datasets (sanity)
+      # --- Validate JSON/GEOJSON in repo before running ---
+      - name: Validate JSON and GEOJSON (repo)
         run: |
-          copernicusmarine describe --dataset-id cmems_mod_glo_phy_anfc_0.083deg_PT1H-m
-          copernicusmarine describe --dataset-id cmems_mod_glo_bgc-pft_anfc_0.25deg_P1D-m
-          copernicusmarine describe --dataset-id cmems_mod_glo_wav_anfc_0.083deg_PT3H-i
+          python - << 'PY'
+          import json
+          from pathlib import Path
 
-      - name: Run pipeline (daily)
+          bad = []
+          for p in Path(".").rglob("*.json"):
+              try:
+                  json.loads(p.read_text(encoding="utf-8"))
+              except Exception as e:
+                  bad.append((str(p), str(e)))
+
+          for p in Path(".").rglob("*.geojson"):
+              try:
+                  json.loads(p.read_text(encoding="utf-8"))
+              except Exception as e:
+                  bad.append((str(p), str(e)))
+
+          if bad:
+              print("❌ Invalid JSON/GEOJSON files:")
+              for f, e in bad:
+                  print("-", f, "=>", e)
+              raise SystemExit(1)
+
+          print("✅ All repo JSON/GEOJSON files are valid.")
+          PY
+
+      # --- Debug CLI help (avoids the 'cmd required' surprise) ---
+      - name: Debug CLI help
         run: |
           export PYTHONPATH="$GITHUB_WORKSPACE/backend"
-          python -m seydyaar
+          python -m seydyaar -h
+          python -m seydyaar run-daily -h
 
-      - name: Show audit + verify outputs
+      # --- Run pipeline (IMPORTANT: include the required subcommand 'run-daily') ---
+      - name: Run pipeline (writes docs/latest)
+        shell: bash
         run: |
-          echo "=== download_manifest.jsonl ==="
-          ls -lah docs/latest/logs || true
-          test -f docs/latest/logs/download_manifest.jsonl && tail -n 5 docs/latest/logs/download_manifest.jsonl || echo "manifest missing"
-          echo "=== verify folder ==="
-          ls -lah "docs/latest/verify/${SEYDYAAR_VERIFY_TIME_ID}" || true
-          echo "=== tmpdir nc count ==="
-          ls -lah "$SEYDYAAR_TMPDIR" || true
-          (ls -1 "$SEYDYAAR_TMPDIR"/*.nc 2>/dev/null | wc -l) || true
+          set -euo pipefail
+          export PYTHONPATH="$GITHUB_WORKSPACE/backend"
 
-      - name: Upload verification NetCDFs (artifact)
+          python -m seydyaar run-daily             --out docs/latest             --past-days 2             --future-days 10             --step-hours 6             --grid 220x220
+
+      # --- Verify outputs JSON are valid ---
+      - name: Validate JSON outputs (docs/latest)
+        if: always()
+        run: |
+          python - << 'PY'
+          import json
+          from pathlib import Path
+
+          out = Path("docs/latest")
+          if not out.exists():
+              raise SystemExit("docs/latest not found")
+
+          bad = []
+          for p in out.rglob("*.json"):
+              try:
+                  json.loads(p.read_text(encoding="utf-8"))
+              except Exception as e:
+                  bad.append((str(p), str(e)))
+
+          if bad:
+              print("❌ Invalid JSON outputs in docs/latest:")
+              for f, e in bad:
+                  print("-", f, "=>", e)
+              raise SystemExit(1)
+
+          print("✅ All docs/latest JSON outputs are valid.")
+          PY
+
+      # --- Ensure manifest + verify folder exist (hard fail if missing) ---
+      - name: Assert manifest & verify exist
+        if: always()
+        run: |
+          echo "== Tree docs/latest/logs =="
+          ls -lah docs/latest/logs || true
+          echo "== Tree docs/latest/verify =="
+          find docs/latest/verify -maxdepth 3 -type f -print || true
+
+          test -f docs/latest/logs/download_manifest.jsonl
+          test -d docs/latest/verify
+          echo "✅ Manifest & verify folder exist."
+
+      # --- Upload verification + logs as artifact (easy download from Actions UI) ---
+      - name: Upload verify + logs as artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: verify_netcdf
-          path: docs/latest/verify/**/*.nc
-          if-no-files-found: warn
+          name: seydyaar_verify_and_logs
+          path: |
+            docs/latest/logs/**
+            docs/latest/verify/**
+          if-no-files-found: error
           retention-days: 7
 
-      - name: Upload Copernicus download manifest (artifact)
-        uses: actions/upload-artifact@v4
-        with:
-          name: download_manifest
-          path: docs/latest/logs/download_manifest.jsonl
-          if-no-files-found: warn
-          retention-days: 30
-
-      - name: Commit docs/latest
+      # --- Commit & push updated docs ---
+      - name: Commit & push updated docs
+        if: always()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
