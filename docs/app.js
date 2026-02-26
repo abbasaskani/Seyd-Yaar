@@ -1,3 +1,157 @@
+
+
+// Cache for existence checks (used when filtering available time IDs)
+const __existsCache = new Map();
+async function exists(url){
+  if(__existsCache.has(url)) return __existsCache.get(url);
+  // fetch() does not reject on HTTP error status codes; check response.status yourself.
+  try{
+    const r = await fetch(url, { method: "HEAD", cache: "no-store" });
+    const ok = (r.status === 200 || r.status === 304);
+    if(ok){ __existsCache.set(url, true); return true; }
+    if(r.status === 405 || r.status === 501){
+      const r2 = await fetch(url, { method: "GET", cache: "no-store" });
+      const ok2 = (r2.status === 200 || r2.status === 304);
+      __existsCache.set(url, ok2);
+      return ok2;
+    }
+    __existsCache.set(url, false);
+    return false;
+  }catch(_){
+    try{
+      const r3 = await fetch(url, { method: "GET", cache: "no-store" });
+      const ok3 = (r3.status === 200 || r3.status === 304);
+      __existsCache.set(url, ok3);
+      return ok3;
+    }catch(__){
+      __existsCache.set(url, false);
+      return false;
+    }
+  }
+}
+
+// Ensure Leaflet bounds exist even though meta.grid only has min/max lon/lat
+function ensureGridBounds(){
+  if(!state.grid) return null;
+  const b = state.grid.bounds;
+  if(Array.isArray(b) && b.length===2 && Array.isArray(b[0]) && Array.isArray(b[1])) return b;
+  const latMin = state.grid.lat_min, latMax = state.grid.lat_max;
+  const lonMin = state.grid.lon_min, lonMax = state.grid.lon_max;
+  if([latMin, latMax, lonMin, lonMax].every(Number.isFinite)){
+    state.grid.bounds = [[latMin, lonMin],[latMax, lonMax]];
+    return state.grid.bounds;
+  }
+  return null;
+}
+
+// Choose per_time key based on current Map + Model selections (best-effort).
+function layerKeyForCurrentSelection(){
+  const mapVal = ($("mapSelect")?.value || state.map || "").toLowerCase();
+  const modelVal = ($("modelSelect")?.value || state.model || "").toLowerCase();
+  const modelKey =
+    (modelVal.includes("frontplus") || modelVal.includes("front+")) ? "frontplus" :
+    (modelVal.includes("scoring") || modelVal.includes("score")) ? "scoring" :
+    "ensemble";
+  if(mapVal.includes("pcatch")) return `pcatch_${modelKey}`;
+  if(mapVal.includes("phab"))   return (modelKey==="frontplus" ? "phab_frontplus" : "phab_scoring");
+  if(mapVal.includes("pops"))   return "pops";
+  if(mapVal.includes("agree"))  return "agree";
+  if(mapVal.includes("spread")) return "spread";
+  if(mapVal.includes("conf"))   return "conf";
+  if(mapVal.includes("sst"))    return "sst";
+  if(mapVal.includes("chl"))    return "chl";
+  if(mapVal.includes("wave"))   return "waves";
+  if(mapVal.includes("current"))return "current";
+  if(mapVal.includes("front"))  return "front";
+  return null;
+}
+
+function mergeAndSortTimeIds(a, b){
+  const s = new Set();
+  (a||[]).forEach(x=>s.add(x));
+  (b||[]).forEach(x=>s.add(x));
+  return Array.from(s).sort(); // YYYYMMDD_HHMMZ
+}
+
+// Scan available time_id folders from the served /times/ directory (local python http.server can expose listings).
+// On GitHub Pages this usually won't work (no directory index); in that case we fall back to meta lists.
+async function scanTimeIdsFromTimesDir(){
+  try{
+    const base = `latest/${state.runPath}/variants/${state.variant}/species/${state.species}/times/`;
+    const r = await fetch(base, { method:"GET", cache:"no-store" });
+    if(!(r.status === 200 || r.status === 304)) return [];
+    const html = await r.text();
+    const reDir = /href="(\d{8}_\d{4}Z)\/"/g;
+    const out = [];
+    let m;
+    while((m = reDir.exec(html)) !== null) out.push(m[1]);
+    return Array.from(new Set(out));
+  }catch(_){
+    return [];
+  }
+}
+
+// Filter time IDs by checking that the selected layer file exists for that time_id
+
+// Build the real URL for a per_time template for a given time_id.
+// Templates may be either:
+// 1) filename only: "pcatch_ensemble_f32.bin"
+// 2) relative path under runPath: "variants/auto/species/skipjack/times/{time}/pcatch_ensemble_f32.bin"
+// 3) relative path under species: "times/{time}/pcatch_ensemble_f32.bin"
+function resolvePerTimeUrl(tpl, timeId){
+  if(!tpl) return null;
+  let s = String(tpl);
+  // replace placeholders (support a few common variants)
+  s = s.replaceAll("{time_id}", timeId).replaceAll("{time}", timeId).replaceAll("{timeId}", timeId);
+  s = s.replace(/^\/+/, ""); // strip leading slashes
+
+  // If template includes a full path starting with variants/..., it's relative to runPath
+  if(s.startsWith("variants/") || s.includes("/variants/") || s.includes("/species/")){
+    return `latest/${state.runPath}/` + s;
+  }
+
+  // If template starts with times/, it's relative to species folder (variants/<variant>/species/<species>/)
+  if(s.startsWith("times/") || s.includes("/times/")){
+    return `latest/${state.runPath}/variants/${state.variant}/species/${state.species}/` + s;
+  }
+
+  // Otherwise, treat it as filename inside times/<timeId>/
+  return `latest/${state.runPath}/variants/${state.variant}/species/${state.species}/times/${timeId}/` + s;
+}
+
+async function filterAvailableTimeIds(timeIds){
+  try{
+    if(!Array.isArray(timeIds) || timeIds.length===0) return [];
+    const perTime = state?.meta?.paths?.per_time || {};
+    const selKey = layerKeyForCurrentSelection();
+    const fname =
+      (selKey && perTime[selKey]) ||
+      perTime["pcatch_ensemble"] ||
+      perTime["phab_scoring"] ||
+      Object.values(perTime)[0];
+    if(!fname) return timeIds;
+
+    // runPrefix unused (resolvePerTimeUrl handles templates)
+    const runPrefix = null;
+    const CONC = 6;
+    const good = [];
+    for(let i=0;i<timeIds.length;i+=CONC){
+      const chunk = timeIds.slice(i, i+CONC);
+      const res = await Promise.all(chunk.map(async tid=>{
+        const url = resolvePerTimeUrl(fname, tid);
+        return (await exists(url)) ? tid : null;
+      }));
+      for(const x of res) if(x) good.push(x);
+    }
+    return good;
+  }catch(e){
+    console.warn("filterAvailableTimeIds failed; using meta list as-is", e);
+    return timeIds;
+  }
+}
+
+
+// ---- Global helper: choose per_time key for the current UI selection ----
 /* Seyd‑Yaar app.js — dynamic map + aggregation + uncertainty + feedback 💠🌊 */
 const $ = (id) => document.getElementById(id);
 const safeText = (id, txt) => { const el = $(id); if (el) el.textContent = txt; };
@@ -160,28 +314,6 @@ const state = {
   qcMaskCache: new Map(), // timeId-> Uint8Array
 };
 
-// --- ensureGridBounds: always have Leaflet-compatible bounds for image overlay ---
-// Leaflet expects [[South,West],[North,East]] for L.imageOverlay bounds.
-function ensureGridBounds(){
-  if(!state.grid) state.grid = {};
-  const g = state.grid;
-  // If already valid, keep it
-  if(Array.isArray(g.bounds) && g.bounds.length===2 && Array.isArray(g.bounds[0]) && Array.isArray(g.bounds[1])){
-    return;
-  }
-  const latMin = g.lat_min ?? g.minLat ?? g.latMin;
-  const latMax = g.lat_max ?? g.maxLat ?? g.latMax;
-  const lonMin = g.lon_min ?? g.minLon ?? g.lonMin;
-  const lonMax = g.lon_max ?? g.maxLon ?? g.lonMax;
-  if([latMin, latMax, lonMin, lonMax].every(Number.isFinite)){
-    g.bounds = [[latMin, lonMin],[latMax, lonMax]];
-  }else{
-    // Leave as null; renderOverlay will safely abort with a useful console error.
-    g.bounds = null;
-  }
-}
-
-
 function fmtTime(isoZ){
   try{
     const d = new Date(isoZ);
@@ -205,6 +337,7 @@ function timeIdToIso(tid){
     return `${y}-${mo}-${d}T${hh}:${mm}:00Z`;
   }catch{ return String(tid); }
 }
+
 async function fetchJson(url){
   const r = await fetch(url, {cache:"no-store"});
   if(!r.ok) throw new Error(`HTTP ${r.status} ${url}`);
@@ -449,11 +582,10 @@ function setLegend(title){
 }
 
 function renderOverlay(arr01, conf01){
-  ensureGridBounds();
   const {width:W, height:H} = state.grid;
-  const bounds = state.grid.bounds;
+  const bounds = ensureGridBounds();
   if(!bounds || !bounds[0] || !bounds[1]){
-    console.error('Invalid grid bounds; cannot render overlay. state.grid=', state.grid);
+    console.error('Invalid grid bounds; cannot render overlay', state.grid);
     return;
   }
   state.canvas.width = W;
@@ -783,7 +915,10 @@ async function computeAndRender(){
     return fetchBin(url, (key.endsWith("_u8")?"u8":"f32"));
   }
 
-  const arrs = await Promise.all(timeIsos.map(loadLayerForTime));
+  const settled = await Promise.allSettled(timeIsos.map(loadLayerForTime));
+  const arrs = settled.filter(x=>x.status==='fulfilled').map(x=>x.value);
+  const usedTimeIsos = settled.map((x,i)=>x.status==='fulfilled'?timeIsos[i]:null).filter(Boolean);
+  if(arrs.length===0){ throw new Error('No data files found for the selected range (all missing).'); }
   let aggMethod = $("aggSelect").value;
   // For conf map we always mean
   if(mapKey==="conf") aggMethod = "mean";
@@ -876,19 +1011,22 @@ async function loadSpeciesMetaAndInit(){
   // run-level meta for availability reporting + deduped time catalog
   state.runMeta = await fetchJson(`latest/${state.runPath}/meta.json`).catch(()=>null);
   state.grid = state.meta.grid;
-  ensureGridBounds();
 
-  // load server mask
+  
+  ensureGridBounds();
+// load server mask
   const maskUrl = `latest/${state.runPath}/${state.meta.paths.mask}`;
   state.baseMask = await fetchBin(maskUrl, "u8");
 
   // effective analysis mask = server mask × user AOI
   state.analysisMask = combineMask(state.baseMask, state.userMask);
 
-  // time selects (prefer runMeta.available_time_ids to avoid listing missing future bins)
-  const availableTimeIds = state.runMeta?.available_time_ids || state.meta.time_ids || [];
-  state.timeIds = availableTimeIds;
-  state.times = availableTimeIds.map(timeIdToIso);
+  // time selects (use meta list + scan /times/ to discover extra past/future folders)
+  const metaList = state.runMeta?.available_time_ids || state.meta.time_ids || [];
+  const scanned = await scanTimeIdsFromTimesDir();
+  const availableTimeIds = mergeAndSortTimeIds(metaList, scanned);
+  state.timeIds = await filterAvailableTimeIds(availableTimeIds);
+  state.times = state.timeIds.map(timeIdToIso);
   state.isoToTimeId = {};
   for(let i=0;i<state.times.length;i++){ state.isoToTimeId[state.times[i]] = state.timeIds[i]; }
 
@@ -1017,6 +1155,12 @@ async function loadSpeciesMetaAndInit(){
     state.agg = $("aggSelect").value;
 
     // if species changed, reload meta (different profile + files)
+    if(id==="modelSelect" || id==="mapSelect"){
+      // Rebuild available time lists based on the layer files actually present
+      await loadSpeciesMetaAndInit();
+      return;
+    }
+
     if(id==="speciesSelect"){
       // Persist per-species lookback (commercial UX: each species remembers its own average window)
       try{ localStorage.setItem(`lookback_${prevSpecies}`, $("lookbackSelect").value); }catch(_){/* ignore */}
@@ -1268,107 +1412,40 @@ $("playBtn").addEventListener("click", ()=>{
     startPlay();
   }
 });
-function __ensureOrder(){
-  const t0El = $("t0Select");
-  const t1El = $("t1Select");
-  if(!t0El || !t1El) return;
-  const v0 = t0El.value;
-  const v1 = t1El.value;
-  // compare as Date to handle formatting differences
-  const d0 = Date.parse(v0);
-  const d1 = Date.parse(v1);
-  if(Number.isFinite(d0) && Number.isFinite(d1) && d0 > d1){
-    // swap selections to enforce From <= To
-    const i0 = t0El.selectedIndex;
-    t0El.selectedIndex = t1El.selectedIndex;
-    t1El.selectedIndex = i0;
-  }
-}
-
-let __playOn = false;
-let __playTimer = null;
-let __playBusy = false;
-
 function startPlay(){
-  __playOn = true;
+  state.playing = true;
   safeText("playBtn", "⏸ Pause");
-  // Make sure range is not inverted at start
-  __ensureOrder();
 
-  const t0El = $("t0Select");
-  const t1El = $("t1Select");
-  const n = t0El?.options?.length ?? 0;
-  if(n <= 0){
-    console.warn("No time options to play.");
-    __playOn = false;
-    safeText("playBtn", "▶ Play");
-    return;
-  }
+  // Keep the selected range length fixed, and slide it forward
+  const rangeLen = Math.abs($("t1Select").selectedIndex - $("t0Select").selectedIndex);
 
-  // Keep the range length fixed (in indices) based on current selection after ordering.
-  let rangeLen = Math.max(0, t1El.selectedIndex - t0El.selectedIndex);
+  const tick = async ()=>{
+    const i0 = $("t0Select").selectedIndex;
+    const i1 = $("t1Select").selectedIndex;
+    const dir = (i1 >= i0) ? 1 : -1; // preserve ordering
 
-  const step = async ()=>{
-    if(!__playOn || __playBusy) return;
-    __playBusy = true;
-    try{
-      __ensureOrder();
-      let i0 = t0El.selectedIndex;
-      let i1 = t1El.selectedIndex;
+    let next0 = i0 + dir;
+    let next1 = next0 + dir*rangeLen;
 
-      // If user changed selection mid-play, refresh range length.
-      if(i1 < i0){
-        const tmp = i0; i0 = i1; i1 = tmp;
-        t0El.selectedIndex = i0;
-        t1El.selectedIndex = i1;
-      }
-      rangeLen = Math.max(0, i1 - i0);
+    // wrap
+    if(next0 < 0) next0 = state.times.length-1;
+    if(next0 >= state.times.length) next0 = 0;
+    if(next1 < 0) next1 = state.times.length-1;
+    if(next1 >= state.times.length) next1 = 0;
 
-      // advance forward (newer) by 1 option; wrap around
-      let next0 = i0 + 1;
-      if(next0 >= n) next0 = 0;
-      let next1 = next0 + rangeLen;
-      if(next1 >= n) next1 = n - 1; // clamp at end (no wrap for end)
-
-      t0El.selectedIndex = next0;
-      t1El.selectedIndex = next1;
-
-      // Ensure ordering again (safety)
-      __ensureOrder();
-
-      // Recompute and redraw for new time range
-      if(typeof computeAndRender === "function"){
-        await computeAndRender();
-      }else if(typeof renderFromCache === "function"){
-        await renderFromCache();
-      }
-    }catch(e){
-      console.error("Play step failed:", e);
-      // stop to avoid spamming errors
-      stopPlay();
-      return;
-    }finally{
-      __playBusy = false;
-      if(__playOn){
-        __playTimer = setTimeout(step, 900);
-      }
-    }
+    $("t0Select").selectedIndex = next0;
+    $("t1Select").selectedIndex = next1;
+    setDirty();
   };
 
-  step();
+  state.timer = setInterval(tick, 900);
 }
-
 function stopPlay(){
-  __playOn = false;
+  state.playing = false;
   safeText("playBtn", "▶ Play");
-  if(__playTimer) clearTimeout(__playTimer);
-  __playTimer = null;
-  __playBusy = false;
+  if(state.timer) clearInterval(state.timer);
+  state.timer = null;
 }
-
-// Keep From/To ordered even when user changes them manually
-$("t0Select")?.addEventListener("change", __ensureOrder);
-$("t1Select")?.addEventListener("change", __ensureOrder);
 
 /* ------------------------------
    Download / Share
