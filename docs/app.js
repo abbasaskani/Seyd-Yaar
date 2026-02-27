@@ -1,157 +1,3 @@
-
-
-// Cache for existence checks (used when filtering available time IDs)
-const __existsCache = new Map();
-async function exists(url){
-  if(__existsCache.has(url)) return __existsCache.get(url);
-  // fetch() does not reject on HTTP error status codes; check response.status yourself.
-  try{
-    const r = await fetch(url, { method: "HEAD", cache: "no-store" });
-    const ok = (r.status === 200 || r.status === 304);
-    if(ok){ __existsCache.set(url, true); return true; }
-    if(r.status === 405 || r.status === 501){
-      const r2 = await fetch(url, { method: "GET", cache: "no-store" });
-      const ok2 = (r2.status === 200 || r2.status === 304);
-      __existsCache.set(url, ok2);
-      return ok2;
-    }
-    __existsCache.set(url, false);
-    return false;
-  }catch(_){
-    try{
-      const r3 = await fetch(url, { method: "GET", cache: "no-store" });
-      const ok3 = (r3.status === 200 || r3.status === 304);
-      __existsCache.set(url, ok3);
-      return ok3;
-    }catch(__){
-      __existsCache.set(url, false);
-      return false;
-    }
-  }
-}
-
-// Ensure Leaflet bounds exist even though meta.grid only has min/max lon/lat
-function ensureGridBounds(){
-  if(!state.grid) return null;
-  const b = state.grid.bounds;
-  if(Array.isArray(b) && b.length===2 && Array.isArray(b[0]) && Array.isArray(b[1])) return b;
-  const latMin = state.grid.lat_min, latMax = state.grid.lat_max;
-  const lonMin = state.grid.lon_min, lonMax = state.grid.lon_max;
-  if([latMin, latMax, lonMin, lonMax].every(Number.isFinite)){
-    state.grid.bounds = [[latMin, lonMin],[latMax, lonMax]];
-    return state.grid.bounds;
-  }
-  return null;
-}
-
-// Choose per_time key based on current Map + Model selections (best-effort).
-function layerKeyForCurrentSelection(){
-  const mapVal = ($("mapSelect")?.value || state.map || "").toLowerCase();
-  const modelVal = ($("modelSelect")?.value || state.model || "").toLowerCase();
-  const modelKey =
-    (modelVal.includes("frontplus") || modelVal.includes("front+")) ? "frontplus" :
-    (modelVal.includes("scoring") || modelVal.includes("score")) ? "scoring" :
-    "ensemble";
-  if(mapVal.includes("pcatch")) return `pcatch_${modelKey}`;
-  if(mapVal.includes("phab"))   return (modelKey==="frontplus" ? "phab_frontplus" : "phab_scoring");
-  if(mapVal.includes("pops"))   return "pops";
-  if(mapVal.includes("agree"))  return "agree";
-  if(mapVal.includes("spread")) return "spread";
-  if(mapVal.includes("conf"))   return "conf";
-  if(mapVal.includes("sst"))    return "sst";
-  if(mapVal.includes("chl"))    return "chl";
-  if(mapVal.includes("wave"))   return "waves";
-  if(mapVal.includes("current"))return "current";
-  if(mapVal.includes("front"))  return "front";
-  return null;
-}
-
-function mergeAndSortTimeIds(a, b){
-  const s = new Set();
-  (a||[]).forEach(x=>s.add(x));
-  (b||[]).forEach(x=>s.add(x));
-  return Array.from(s).sort(); // YYYYMMDD_HHMMZ
-}
-
-// Scan available time_id folders from the served /times/ directory (local python http.server can expose listings).
-// On GitHub Pages this usually won't work (no directory index); in that case we fall back to meta lists.
-async function scanTimeIdsFromTimesDir(){
-  try{
-    const base = `latest/${state.runPath}/variants/${state.variant}/species/${state.species}/times/`;
-    const r = await fetch(base, { method:"GET", cache:"no-store" });
-    if(!(r.status === 200 || r.status === 304)) return [];
-    const html = await r.text();
-    const reDir = /href="(\d{8}_\d{4}Z)\/"/g;
-    const out = [];
-    let m;
-    while((m = reDir.exec(html)) !== null) out.push(m[1]);
-    return Array.from(new Set(out));
-  }catch(_){
-    return [];
-  }
-}
-
-// Filter time IDs by checking that the selected layer file exists for that time_id
-
-// Build the real URL for a per_time template for a given time_id.
-// Templates may be either:
-// 1) filename only: "pcatch_ensemble_f32.bin"
-// 2) relative path under runPath: "variants/auto/species/skipjack/times/{time}/pcatch_ensemble_f32.bin"
-// 3) relative path under species: "times/{time}/pcatch_ensemble_f32.bin"
-function resolvePerTimeUrl(tpl, timeId){
-  if(!tpl) return null;
-  let s = String(tpl);
-  // replace placeholders (support a few common variants)
-  s = s.replaceAll("{time_id}", timeId).replaceAll("{time}", timeId).replaceAll("{timeId}", timeId);
-  s = s.replace(/^\/+/, ""); // strip leading slashes
-
-  // If template includes a full path starting with variants/..., it's relative to runPath
-  if(s.startsWith("variants/") || s.includes("/variants/") || s.includes("/species/")){
-    return `latest/${state.runPath}/` + s;
-  }
-
-  // If template starts with times/, it's relative to species folder (variants/<variant>/species/<species>/)
-  if(s.startsWith("times/") || s.includes("/times/")){
-    return `latest/${state.runPath}/variants/${state.variant}/species/${state.species}/` + s;
-  }
-
-  // Otherwise, treat it as filename inside times/<timeId>/
-  return `latest/${state.runPath}/variants/${state.variant}/species/${state.species}/times/${timeId}/` + s;
-}
-
-async function filterAvailableTimeIds(timeIds){
-  try{
-    if(!Array.isArray(timeIds) || timeIds.length===0) return [];
-    const perTime = state?.meta?.paths?.per_time || {};
-    const selKey = layerKeyForCurrentSelection();
-    const fname =
-      (selKey && perTime[selKey]) ||
-      perTime["pcatch_ensemble"] ||
-      perTime["phab_scoring"] ||
-      Object.values(perTime)[0];
-    if(!fname) return timeIds;
-
-    // runPrefix unused (resolvePerTimeUrl handles templates)
-    const runPrefix = null;
-    const CONC = 6;
-    const good = [];
-    for(let i=0;i<timeIds.length;i+=CONC){
-      const chunk = timeIds.slice(i, i+CONC);
-      const res = await Promise.all(chunk.map(async tid=>{
-        const url = resolvePerTimeUrl(fname, tid);
-        return (await exists(url)) ? tid : null;
-      }));
-      for(const x of res) if(x) good.push(x);
-    }
-    return good;
-  }catch(e){
-    console.warn("filterAvailableTimeIds failed; using meta list as-is", e);
-    return timeIds;
-  }
-}
-
-
-// ---- Global helper: choose per_time key for the current UI selection ----
 /* Seyd‑Yaar app.js — dynamic map + aggregation + uncertainty + feedback 💠🌊 */
 const $ = (id) => document.getElementById(id);
 const safeText = (id, txt) => { const el = $(id); if (el) el.textContent = txt; };
@@ -337,7 +183,6 @@ function timeIdToIso(tid){
     return `${y}-${mo}-${d}T${hh}:${mm}:00Z`;
   }catch{ return String(tid); }
 }
-
 async function fetchJson(url){
   const r = await fetch(url, {cache:"no-store"});
   if(!r.ok) throw new Error(`HTTP ${r.status} ${url}`);
@@ -495,19 +340,215 @@ function initMap(){
   // offscreen canvas
   state.canvas = document.createElement("canvas");
   state.ctx = state.canvas.getContext("2d", {willReadFrequently:false});
+  try{ afterMapInit_v22(); }catch(_){ }
 }
+
+/* ------------------------------
+   v22: Grid 0.5°, AOI, Time slider, DBSCAN clustering, Auto-analyze
+------------------------------ */
+let gridLayer = null;
+// Existence check helper (HEAD preferred; fallback to GET)
+const __existsCache = new Map();
+async function exists(url){
+  if(__existsCache.has(url)) return __existsCache.get(url);
+  try{
+    const r = await fetch(url, {method:"HEAD", cache:"no-store"});
+    const ok = (r.status===200 || r.status===304);
+    if(ok){ __existsCache.set(url,true); return true; }
+    if(r.status===405 || r.status===501){
+      const r2 = await fetch(url, {method:"GET", cache:"no-store"});
+      const ok2 = (r2.status===200 || r2.status===304);
+      __existsCache.set(url, ok2); return ok2;
+    }
+    __existsCache.set(url,false); return false;
+  }catch(_){
+    try{
+      const r3 = await fetch(url, {method:"GET", cache:"no-store"});
+      const ok3 = (r3.status===200 || r3.status===304);
+      __existsCache.set(url, ok3); return ok3;
+    }catch(__){
+      __existsCache.set(url,false); return false;
+    }
+  }
+}
+
+function mergeAndSortTimeIds(a,b){
+  const s = new Set();
+  (a||[]).forEach(x=>s.add(x));
+  (b||[]).forEach(x=>s.add(x));
+  return Array.from(s).sort(); // YYYYMMDD_HHMMZ
+}
+
+async function scanTimeIdsFromTimesDir(){
+  // Works on local python http.server (directory listing). On GitHub Pages it may return 404/HTML without listing.
+  try{
+    const base = `latest/${state.runPath}/variants/${state.variant}/species/${state.species}/times/`;
+    const r = await fetch(base, {cache:"no-store"});
+    if(!(r.status===200 || r.status===304)) return [];
+    const html = await r.text();
+    const reDir = /href="(\d{8}_\d{4}Z)\/"/g;
+    const out=[]; let m;
+    while((m=reDir.exec(html))!==null) out.push(m[1]);
+    return Array.from(new Set(out));
+  }catch(_){
+    return [];
+  }
+}
+
+function currentPerTimeKey(){
+  const mapKey = $("mapSelect")?.value || "pcatch";
+  const modelKey = $("modelSelect")?.value || "ensemble";
+  if(mapKey==="pcatch") return `pcatch_${modelKey}`;
+  if(mapKey==="phab") return (modelKey==="frontplus") ? "phab_frontplus" : "phab_scoring";
+  if(mapKey==="pops") return "pops";
+  if(mapKey==="agree") return "agree";
+  if(mapKey==="spread") return "spread";
+  if(mapKey==="conf") return "conf";
+  return `pcatch_${modelKey}`;
+}
+
+async function filterTimeIdsByExistingLayer(timeIds){
+  try{
+    const key = currentPerTimeKey();
+    const tpl = state?.meta?.paths?.per_time?.[key];
+    if(!tpl || typeof tpl!=="string") return timeIds;
+
+    const good=[];
+    const CONC=6;
+    for(let i=0;i<timeIds.length;i+=CONC){
+      const chunk = timeIds.slice(i,i+CONC);
+      const res = await Promise.all(chunk.map(async tid=>{
+        const url = `latest/${state.runPath}/${tpl.replace("{time}", tid).replace("{time_id}", tid)}`;
+        return (await exists(url)) ? tid : null;
+      }));
+      for(const x of res) if(x) good.push(x);
+    }
+    return good;
+  }catch(_){
+    return timeIds;
+  }
+}
+
+function afterMapInit_v22(){
+  ensurePanes();
+
+  map.on("moveend", ()=>{ try{ drawGrid05(); }catch(_){} });
+  map.on("click", (e)=>{ 
+    if(($("aoiMode")?.value)!=="draw") return;
+    if(!aoiStart){ aoiStart = e.latlng; toast(lang==="fa" ? "گوشه دوم را کلیک کن" : "Click second corner", "info", "AOI"); return; }
+    const b = L.latLngBounds(aoiStart, e.latlng);
+    aoiStart = null;
+    setAOI(b);
+    scheduleAnalyze();
+  });
+  map.on("mousemove", (e)=>{
+    try{
+      if(!state.lastComputed?.arrShown) return;
+      const g = state.grid;
+      const W=g.width, H=g.height;
+      const lat=e.latlng.lat, lon=e.latlng.lng;
+      if(lat<g.lat_min || lat>g.lat_max || lon<g.lon_min || lon>g.lon_max) return;
+
+      const fx = (lon - g.lon_min) / (g.lon_max - g.lon_min);
+      const fy = (g.lat_max - lat) / (g.lat_max - g.lat_min);
+      const x = Math.max(0, Math.min(W-1, Math.round(fx*(W-1))));
+      const y = Math.max(0, Math.min(H-1, Math.round(fy*(H-1))));
+      const v = state.lastComputed.arrShown[y*W+x];
+      if(!Number.isFinite(v)) return;
+      const p = percentileOfValue(v);
+      const txt = `${lat.toFixed(3)}, ${lon.toFixed(3)} • ${(v*100).toFixed(1)}%` + (p!=null ? ` • P${Math.round(p*100)}` : "");
+      if(!hoverTooltip){
+        hoverTooltip = L.tooltip({sticky:true, direction:"top", opacity:0.85}).setContent(txt);
+        hoverTooltip.setLatLng(e.latlng);
+        hoverTooltip.addTo(map);
+      }else{
+        hoverTooltip.setLatLng(e.latlng);
+        hoverTooltip.setContent(txt);
+      }
+    }catch(_){}
+  });
+  setTimeout(()=>{ try{ drawGrid05(); }catch(_){} }, 150);
+}
+
+$("exportClustersBtn")?.addEventListener("click", ()=>{
+  const data = state.clusters || [];
+  const blob = new Blob([JSON.stringify(data, null, 2)], {type:"application/json"});
+  const url = URL.createObjectURL(blob);
+  const a=document.createElement("a"); a.href=url; a.download="clusters.json"; a.click();
+  setTimeout(()=>URL.revokeObjectURL(url), 2000);
+});
+
+$("exportTopBtn")?.addEventListener("click", ()=>{
+  const top = state.lastComputed?.topFiltered || [];
+  const lines = ["rank,lat,lon,prob_pct,percentile"];
+  top.forEach((p,i)=>{
+    lines.push([i+1,p.lat,p.lon,(p.p).toFixed(1), (p.pct!=null?Math.round(p.pct*100):"")].join(","));
+  });
+  const blob=new Blob([lines.join("\n")], {type:"text/csv"});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement("a"); a.href=url; a.download="top_points.csv"; a.click();
+  setTimeout(()=>URL.revokeObjectURL(url), 2000);
+});
+
+// Auto-analyze with debounce
+let _anTimer = null;
+function scheduleAnalyze(){
+  if(!$("autoAnalyzeToggle")?.checked) return;
+  clearTimeout(_anTimer);
+  _anTimer = setTimeout(()=>{ try{ computeAndRender(); }catch(_){} }, 320);
+}
+
+["gridToggle","avgToggle","aoiMode","clusterThreshold","clusterEpsKm","clusterMinPts","stepSelect","aggSelect","mapSelect","modelSelect"].forEach(id=>{
+  $(id)?.addEventListener("change", ()=>{ 
+    if(id==="gridToggle"){ drawGrid05(); }
+    scheduleAnalyze();
+  });
+});
+
+// Bottom time slider binds to Single time mode by default
+function syncSliderFromSelect(){
+  const i = $("t1Select")?.selectedIndex ?? 0;
+  const s = $("timeSlider"); if(!s) return;
+  s.max = Math.max(0, state.times.length-1);
+  s.value = String(Math.max(0, i));
+  $("timeNowLabel").textContent = state.times[i] ? new Date(state.times[i]).toISOString().replace("T"," ").slice(0,16)+"Z" : "—";
+}
+function syncSelectFromSlider(){
+  const s = $("timeSlider"); if(!s) return;
+  const i = Number(s.value||0);
+  $("t0Select").selectedIndex = i;
+  $("t1Select").selectedIndex = i;
+  $("timeNowLabel").textContent = state.times[i] ? new Date(state.times[i]).toISOString().replace("T"," ").slice(0,16)+"Z" : "—";
+}
+
+$("timeSlider")?.addEventListener("input", ()=>{
+  if($("avgToggle")?.checked) return; // slider drives single-time only
+  syncSelectFromSlider();
+  scheduleAnalyze();
+});
+$("playBtnBottom")?.addEventListener("click", ()=>{
+  $("playBtn")?.click();
+});
+
+
 
 /* ------------------------------
    Colormap (RdYlGn-like)
 ------------------------------ */
 const stops = [
-  {p:0.00, c:[255, 58, 58]},
-  {p:0.50, c:[255, 233, 90]},
-  {p:1.00, c:[57, 255, 159]},
+  {p:0.00, c:[40, 30, 120]},   // deep indigo
+  {p:0.55, c:[46, 204, 113]}, // green
+  {p:1.00, c:[241, 196, 15]}, // yellow
 ];
 function lerp(a,b,t){return a+(b-a)*t}
 function colorFor(v01){
-  const v = Math.min(1, Math.max(0, v01));
+  // Dynamic scaling per selection (AOI + current layer)
+  const sMin = (typeof state.scaleMin==='number') ? state.scaleMin : 0;
+  const sMax = (typeof state.scaleMax==='number') ? state.scaleMax : 1;
+  const denom = (sMax - sMin) || 1;
+  const vScaled = (v01 - sMin) / denom;
+
+  const v = Math.min(1, Math.max(0, vScaled));
   let a=stops[0], b=stops[stops.length-1];
   for(let i=0;i<stops.length-1;i++){
     if(v>=stops[i].p && v<=stops[i+1].p){ a=stops[i]; b=stops[i+1]; break; }
@@ -573,21 +614,20 @@ function aggregatePerPixel(arrs, method){
    Rendering to overlay
 ------------------------------ */
 function setLegend(title){
+  const mn = (typeof state.scaleMin==='number') ? (state.scaleMin*100).toFixed(1) : '';
+  const mx = (typeof state.scaleMax==='number') ? (state.scaleMax*100).toFixed(1) : '';
+  const mm = (mn && mx) ? ` <span style="font-weight:700;opacity:.9">(${mn}–${mx}%)</span>` : '';
+
   const el = $("legend");
   el.innerHTML = `
-    <div style="font-weight:900; margin-bottom:6px">${title}</div>
+    <div style="font-weight:900; margin-bottom:6px">${title}${mm}</div>
     <div class="bar"></div>
     <div class="row2"><span>Low</span><span>High</span></div>
   `;
 }
 
 function renderOverlay(arr01, conf01){
-  const {width:W, height:H} = state.grid;
-  const bounds = ensureGridBounds();
-  if(!bounds || !bounds[0] || !bounds[1]){
-    console.error('Invalid grid bounds; cannot render overlay', state.grid);
-    return;
-  }
+  const {width:W, height:H, bounds} = state.grid;
   state.canvas.width = W;
   state.canvas.height = H;
   const img = state.ctx.createImageData(W, H);
@@ -870,6 +910,14 @@ function renderFromCache(){
   const {minP, lim} = getTopFilter();
   const topAll = topKFromArray(arrShown, 100);
   const topFiltered = topAll.filter(x=>x.p >= minP).slice(0, Math.min(100, lim));
+  // attach rank + percentile for exports
+  const dist = state._distVals || [];
+  topFiltered.forEach((pt, idx)=>{
+    pt.rank = idx+1;
+    pt.pct = (typeof percentileOfValue==='function') ? percentileOfValue(pt.p/100) : null;
+  });
+  state.lastComputed.topFiltered = topFiltered;
+
 
   const midTime = timeIsos[Math.floor(timeIsos.length/2)];
   loadCovAtPoints(midTime, topFiltered).then(covs=>renderTop10(topFiltered, covs));
@@ -915,10 +963,7 @@ async function computeAndRender(){
     return fetchBin(url, (key.endsWith("_u8")?"u8":"f32"));
   }
 
-  const settled = await Promise.allSettled(timeIsos.map(loadLayerForTime));
-  const arrs = settled.filter(x=>x.status==='fulfilled').map(x=>x.value);
-  const usedTimeIsos = settled.map((x,i)=>x.status==='fulfilled'?timeIsos[i]:null).filter(Boolean);
-  if(arrs.length===0){ throw new Error('No data files found for the selected range (all missing).'); }
+  const arrs = await Promise.all(timeIsos.map(loadLayerForTime));
   let aggMethod = $("aggSelect").value;
   // For conf map we always mean
   if(mapKey==="conf") aggMethod = "mean";
@@ -1012,21 +1057,21 @@ async function loadSpeciesMetaAndInit(){
   state.runMeta = await fetchJson(`latest/${state.runPath}/meta.json`).catch(()=>null);
   state.grid = state.meta.grid;
 
-  
-  ensureGridBounds();
-// load server mask
+  // load server mask
   const maskUrl = `latest/${state.runPath}/${state.meta.paths.mask}`;
   state.baseMask = await fetchBin(maskUrl, "u8");
 
   // effective analysis mask = server mask × user AOI
   state.analysisMask = combineMask(state.baseMask, state.userMask);
 
-  // time selects (use meta list + scan /times/ to discover extra past/future folders)
-  const metaList = state.runMeta?.available_time_ids || state.meta.time_ids || [];
-  const scanned = await scanTimeIdsFromTimesDir();
-  const availableTimeIds = mergeAndSortTimeIds(metaList, scanned);
-  state.timeIds = await filterAvailableTimeIds(availableTimeIds);
+  // time selects (prefer runMeta.available_time_ids to avoid listing missing future bins)
+  const availableTimeIds = state.runMeta?.available_time_ids || state.meta.time_ids || [];
+  state.timeIds = await filterTimeIdsByExistingLayer(availableTimeIds);
+  // keep derived ISO list in sync
   state.times = state.timeIds.map(timeIdToIso);
+  state.isoToTimeId = {};
+  for(let i=0;i<state.times.length;i++){ state.isoToTimeId[state.times[i]] = state.timeIds[i]; }
+  state.times = availableTimeIds.map(timeIdToIso);
   state.isoToTimeId = {};
   for(let i=0;i<state.times.length;i++){ state.isoToTimeId[state.times[i]] = state.timeIds[i]; }
 
@@ -1155,12 +1200,6 @@ async function loadSpeciesMetaAndInit(){
     state.agg = $("aggSelect").value;
 
     // if species changed, reload meta (different profile + files)
-    if(id==="modelSelect" || id==="mapSelect"){
-      // Rebuild available time lists based on the layer files actually present
-      await loadSpeciesMetaAndInit();
-      return;
-    }
-
     if(id==="speciesSelect"){
       // Persist per-species lookback (commercial UX: each species remembers its own average window)
       try{ localStorage.setItem(`lookback_${prevSpecies}`, $("lookbackSelect").value); }catch(_){/* ignore */}
@@ -1412,38 +1451,66 @@ $("playBtn").addEventListener("click", ()=>{
     startPlay();
   }
 });
+
 function startPlay(){
+  if($("avgToggle")?.checked){
+    toast(lang==="fa" ? "برای Play، حالت Average را خاموش کن" : "Turn off Average to Play", "info", "Play");
+    return;
+  }
+  if(state.playing) return;
   state.playing = true;
   safeText("playBtn", "⏸ Pause");
+  safeText("playBtnBottom", "⏸");
 
-  // Keep the selected range length fixed, and slide it forward
+  // Keep selected range length fixed and slide it forward over available times
   const rangeLen = Math.abs($("t1Select").selectedIndex - $("t0Select").selectedIndex);
 
+  let busy = false;
+  const stepHours = Number($("stepSelect")?.value || 6);
+  const stepN = Math.max(1, Math.round(stepHours/6)); // time list is 6h-granular
+
   const tick = async ()=>{
-    const i0 = $("t0Select").selectedIndex;
-    const i1 = $("t1Select").selectedIndex;
-    const dir = (i1 >= i0) ? 1 : -1; // preserve ordering
+    if(!state.playing) return;
+    if(busy){ state.timer = setTimeout(tick, 350); return; }
+    busy = true;
+    try{
+      const i0 = $("t0Select").selectedIndex;
+      const i1 = $("t1Select").selectedIndex;
+      const dir = (i1 >= i0) ? 1 : -1;
 
-    let next0 = i0 + dir;
-    let next1 = next0 + dir*rangeLen;
+      let next0 = i0 + dir*stepN;
+      let next1 = next0 + dir*rangeLen;
 
-    // wrap
-    if(next0 < 0) next0 = state.times.length-1;
-    if(next0 >= state.times.length) next0 = 0;
-    if(next1 < 0) next1 = state.times.length-1;
-    if(next1 >= state.times.length) next1 = 0;
+      // wrap
+      const n = state.times.length;
+      while(next0 < 0) next0 += n;
+      while(next0 >= n) next0 -= n;
+      while(next1 < 0) next1 += n;
+      while(next1 >= n) next1 -= n;
 
-    $("t0Select").selectedIndex = next0;
-    $("t1Select").selectedIndex = next1;
-    setDirty();
+      $("t0Select").selectedIndex = next0;
+      $("t1Select").selectedIndex = next1;
+
+      // Recompute and redraw for the new time range
+      await computeAndRender();
+      try{ syncSliderFromSelect(); }catch(_){}
+    }catch(e){
+      console.error("Play step failed:", e);
+    }finally{
+      busy = false;
+      state.timer = setTimeout(tick, 900);
+    }
   };
 
-  state.timer = setInterval(tick, 900);
+  // kick off
+  tick();
 }
+
 function stopPlay(){
   state.playing = false;
   safeText("playBtn", "▶ Play");
-  if(state.timer) clearInterval(state.timer);
+  safeText("playBtnBottom", "▶");
+  if(state.timer) clearTimeout(state.timer);
   state.timer = null;
 }
 
