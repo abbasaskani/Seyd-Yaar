@@ -8,11 +8,11 @@
   <meta name="theme-color" content="#03243b" />
   <link rel="icon" href="assets/logo.png" />
   <link rel="stylesheet" href="styles.css" />
-  <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.css" />
 
   <!-- Leaflet -->
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css"
+ />
 </head>
 <body class="ocean appPage">
   <div class="bgPhoto" aria-hidden="true"></div>
@@ -37,7 +37,7 @@
   <main class="appLayout">
     <aside class="panel glass" id="panel">
       <div class="sheetHandle" id="sheetHandle" aria-hidden="true"></div>
-      <div class="row">
+      <div class="row" id="rowRun" style="display:none;">
         <label class="lbl" id="lblRun">Run</label>
         <select id="runSelect"></select>
       </div>
@@ -103,19 +103,135 @@
         <select id="stepSelect">
           <option value="6" selected>6h</option>
           <option value="12">12h</option>
+          <option value="24">24h</option>
         </select>
       </div>
+      <div class="row three">
+        <label class="chk">
+          <input type="checkbox" id="pinToggle" />
+          <span title="On click, drop a pin marker and keep it.">Pin on click</span>
+        </label>
+
+        <label class="chk">
+          <input type="checkbox" id="autoAnalyzeToggle" checked />
+          <span>Auto‑Analyze</span>
+        </label>
+        <label class="chk">
+          <input type="checkbox" id="gridToggle" />
+          <span>Grid 0.5°</span>
+        </label>
+        <label class="chk">
+          <input type="checkbox" id="avgToggle" />
+          <span>Average (range)</span>
+        </label>
+      </div>
+
+      <div class="row">
+        <label class="lbl">AOI</label>
+        <div class="aoiRow">
+          <select id="aoiMode">
+            <option value="full" selected>Full (dataset)</option>
+            <option value="view">Current view</option>
+            <option value="draw">Draw rectangle</option>
+          </select>
+          <button id="aoiDrawBtn" class="btnGhost">Draw</button>
+          <button id="aoiClearBtn" class="btnGhost">Clear</button>
+        </div>
+      </div>
+
+      <div class="row">
+        <label class="lbl">Clustering (DBSCAN)</label>
+        
+        <div class="clusterRow">
+          <select id="clusterMethod" title="Clustering method">
+            <option value="contour">Contour (connected areas)</option>
+            <option value="dbscan" selected>DBSCAN (point density)</option>
+          </select>
+
+          <select id="clusterThreshold" title="Minimum probability to include in clustering (current layer)">
+            <option value="90">≥ 90%</option>
+            <option value="85" selected>≥ 85%</option>
+            <option value="80">≥ 80%</option>
+            <option value="75">≥ 75%</option>
+            <option value="70">≥ 70%</option>
+          </select>
+
+          <input id="clusterEpsKm" type="number" min="1" step="1" value="25" title="DBSCAN eps (km)" />
+          <input id="clusterMinPts" type="number" min="2" step="1" value="6" title="Min points / Min cells" />
+
+          <select id="clusterCenterMode" title="Cluster center definition">
+            <option value="weighted" selected>Center: weighted</option>
+            <option value="centroid">Center: centroid</option>
+            <option value="peak">Center: peak</option>
+          </select>
+
+          <button id="clusterBtn" class="btnPrimary">Cluster</button>
+        </div>
+
+        <div class="hintSmall">Threshold is absolute probability (current layer). MinPts = minimum size (cells) for Contour mode.</div>
+
+        <div class="weights"><div class="weights">
+          <div class="wrow2">
+            <label>Preset</label>
+            <select id="weightPreset">
+              <option value="default" selected>Default (0.70 / 0.30 / 0.02)</option>
+              <option value="stable">Stability (Mean‑heavy)</option>
+              <option value="peak">Peak (Max‑heavy)</option>
+              <option value="wide">Wide (Area‑heavy)</option>
+            </select>
+            <button id="resetWeightsBtn" class="btnGhost" title="Reset to default">Reset</button>
+          </div>
+
+          <div class="wrowNum">
+            <span>Mean</span>
+            <input id="wMeanNum" type="number" step="0.05" min="0" max="1" value="0.70" />
+          </div>
+          <div class="wrowNum">
+            <span>Max</span>
+            <input id="wMaxNum" type="number" step="0.05" min="0" max="1" value="0.30" />
+          </div>
+          <div class="wrowNum">
+            <span>Area</span>
+            <input id="wAreaNum" type="number" step="0.05" min="0" max="1" value="0.02" />
+          </div>
+          <div class="hintSmall">Weights auto‑normalize (sum=1). Area uses log(1+Area).</div>
+        </div>
+      </div>
+      <div class="clusterList" id="clusterList"></div>
+
+      </div>
+
+      <div class="row">
+        <button id="exportClustersBtn" class="btnGhost">Export clusters (JSON)</button>
+        <button id="exportTopBtn" class="btnGhost">Export top points (CSV)</button>
+        <button id="exportPinsBtn" class="btnGhost">Export pins (CSV)</button>
+      </div>
+
+
 
       <div class="row">
         <label class="lbl">Lookback</label>
         <select id="lookbackSelect">
           <option value="0" selected>Manual range</option>
-          <option value="2">Avg last 2 days</option>
-          <option value="3">Avg last 3 days</option>
-          <option value="4">Avg last 4 days</option>
-          <option value="5">Avg last 5 days</option>
-          <option value="6">Avg last 6 days</option>
-          <option value="7">Avg last 7 days</option>
+          <optgroup label="Past (avg)">
+            <option value="1">Avg last 1 day</option>
+            <option value="2">Avg last 2 days</option>
+            <option value="3">Avg last 3 days</option>
+            <option value="4">Avg last 4 days</option>
+            <option value="5">Avg last 5 days</option>
+            <option value="6">Avg last 6 days</option>
+            <option value="7">Avg last 7 days</option>
+          </optgroup>
+          <optgroup label="Future (avg)">
+            <option value="-1">Avg next 1 day</option>
+            <option value="-2">Avg next 2 days</option>
+            <option value="-3">Avg next 3 days</option>
+            <option value="-4">Avg next 4 days</option>
+            <option value="-5">Avg next 5 days</option>
+            <option value="-6">Avg next 6 days</option>
+            <option value="-7">Avg next 7 days</option>
+            <option value="-10">Avg next 10 days</option>
+          </optgroup>
         </select>
       </div>
 
@@ -328,12 +444,31 @@ Example:
 
   <div id="toastHost" class="toastHost" aria-live="polite" aria-atomic="true"></div>
 
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
-          integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
-  <script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"
+></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.js"></script>
   <script src="app.js"></script>
   <script>
     if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
   </script>
+
+  <div id="timeBar">
+    <button id="playBtnBottom" class="btnPrimary">▶</button>
+    <div class="timeInfo">
+      <div id="timeNowLabel">—</div>
+      <div class="timeModeHint">Single time (use slider) • Turn on “Average” for range</div>
+    </div>
+    <input id="timeSlider" type="range" min="0" max="0" value="0" step="1" />
+  </div>
+
+  <div id="detailsModal" class="modal hidden">
+    <div class="modalCard">
+      <div class="modalHeader">
+        <div id="detailsModalTitle">Details</div>
+        <button id="detailsModalClose" class="btnGhost">✕</button>
+      </div>
+      <div id="detailsModalBody" class="modalBody"></div>
+    </div>
+  </div>
 </body>
 </html>
