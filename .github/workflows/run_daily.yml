@@ -20,7 +20,9 @@ jobs:
       COPERNICUS_MARINE_PASSWORD: ${{ secrets.COPERNICUSMARINE_SERVICE_PASSWORD }}
 
       SEYDYAAR_STRICT_COPERNICUS: "1"
-      SEYDYAAR_REWRITE: "1"
+      # If set to "1", the workflow will wipe docs/latest/runs/main and fully rebuild.
+      # Default "0" preserves existing runs so only missing timestamps are generated.
+      SEYDYAAR_REWRITE: "0"
 
       SEYDYAAR_TMPDIR: "backend/.seydyaar_tmp"
       SEYDYAAR_LOG_DIR: "docs/latest/logs"
@@ -50,7 +52,9 @@ jobs:
 
       - name: Clean previous outputs (rewrite)
         run: |
-          rm -rf docs/latest/runs/main || true
+          if [ "${SEYDYAAR_REWRITE:-0}" = "1" ]; then
+            rm -rf docs/latest/runs/main || true
+          fi
           rm -rf docs/latest/verify || true
           rm -rf docs/latest/logs || true
           mkdir -p docs/latest/logs docs/latest/verify
