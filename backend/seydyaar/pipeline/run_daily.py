@@ -29,6 +29,18 @@ def _append_jsonl(path: Path, obj: Dict[str, Any]) -> None:
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
+def _write_json(path: Path, obj: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(obj, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+def _ensure_run_markers(log_dir: Path, verify_dir: Path, verify_time_id: str, summary: Dict[str, Any]) -> None:
+    log_dir.mkdir(parents=True, exist_ok=True)
+    verify_root = verify_dir / verify_time_id
+    verify_root.mkdir(parents=True, exist_ok=True)
+    _write_json(log_dir / "run_summary.json", summary)
+    _write_json(verify_root / "run_summary.json", summary)
+
+
 def _walk_find_key(obj: Any, key: str) -> List[Any]:
     found: List[Any] = []
     if isinstance(obj, dict):
@@ -471,6 +483,8 @@ def run_daily(
     strict_cmems = os.getenv("SEYDYAAR_STRICT_COPERNICUS", "0") == "1"
     verify_dir = Path(os.getenv("SEYDYAAR_VERIFY_DIR", out_root / "verify"))
     verify_dir.mkdir(parents=True, exist_ok=True)
+    log_dir = Path(os.getenv("SEYDYAAR_LOG_DIR", out_root / "logs"))
+    log_dir.mkdir(parents=True, exist_ok=True)
     verify_time_id = now_utc.replace(hour=0, minute=0, second=0, microsecond=0).strftime("%Y%m%d_0000Z")
 
     run_meta = {
@@ -480,6 +494,8 @@ def run_daily(
         "time_source": time_source,
         "times": ts_list,
         "time_ids": time_ids,
+        "available_time_ids": time_ids,
+        "latest_available_time_id": (time_ids[-1] if time_ids else None),
         "variants": [variant],
         "species": list(species_profiles.keys()),
         "bbox": list(bbox),
@@ -498,6 +514,7 @@ def run_daily(
     layers_cache: Dict[str, Tuple[Dict[str, np.ndarray], Dict[str, Any]]] = {}
 
     force = os.getenv("SEYDYAAR_FORCE_REGEN", "0") == "1"
+    run_counts = {"regenerated": 0, "skipped_existing": 0, "copernicus_ok": 0, "synthetic_fallback": 0}
 
     for sp, prof in species_profiles.items():
         priors = prof.get("priors", {})
@@ -552,6 +569,7 @@ def run_daily(
 
             if (not force) and (times_root / tid / "pcatch_scoring_f32.bin").exists():
                 provider_status.append({"timestamp": ts_iso, "skipped": True, "reason": "already_exists"})
+                run_counts["skipped_existing"] += 1
                 continue
 
             # Cache across species by tid
@@ -573,6 +591,10 @@ def run_daily(
                 layers_cache[tid] = (layers, status)
 
             provider_status.append({"timestamp": ts_iso, **status})
+            if isinstance(status, dict) and status.get("ok"):
+                run_counts["copernicus_ok"] += 1
+            if isinstance(status, dict) and status.get("fallback") == "synthetic":
+                run_counts["synthetic_fallback"] += 1
             # Save raw NetCDFs for today 00:00Z so you can cross-check with Copernicus Viewer.
             if tid == verify_time_id and isinstance(status, dict):
                 nc_paths = status.get("nc_paths") or {}
@@ -630,11 +652,27 @@ def run_daily(
 
             write_bin_u8(tdir / "qc_chl_u8.bin", layers["qc_chl"])
             write_bin_f32(tdir / "conf_f32.bin", layers["conf"])
+            run_counts["regenerated"] += 1
 
         sp_meta2 = json.loads((sp_root / "meta.json").read_text(encoding="utf-8"))
         sp_meta2["provider_status"] = provider_status
         write_json(sp_root / "meta.json", sp_meta2)
         minify_json_for_web(sp_root / "meta.json")
+
+    summary = {
+        "run_id": run_id,
+        "generated_at_utc": now_utc.isoformat().replace("+00:00", "Z"),
+        "time_source": time_source,
+        "verify_time_id": verify_time_id,
+        "force_regen": force,
+        "strict_copernicus": strict_cmems,
+        "counts": run_counts,
+        "available_time_ids": time_ids,
+        "latest_available_time_id": (time_ids[-1] if time_ids else None),
+        "species": list(species_profiles.keys()),
+        "variant": variant,
+    }
+    _ensure_run_markers(log_dir, verify_dir, verify_time_id, summary)
 
     run_entry = {
         "run_id": run_id,
