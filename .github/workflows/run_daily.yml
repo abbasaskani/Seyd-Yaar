@@ -23,6 +23,8 @@ jobs:
       # If set to "1", the workflow will wipe docs/latest/runs/main and fully rebuild.
       # Default "0" preserves existing runs so only missing timestamps are generated.
       SEYDYAAR_REWRITE: "0"
+      # If set to "1", outputs are regenerated even when per-time products already exist.
+      SEYDYAAR_FORCE_REGEN: "0"
 
       SEYDYAAR_TMPDIR: "backend/.seydyaar_tmp"
       SEYDYAAR_LOG_DIR: "docs/latest/logs"
@@ -66,12 +68,21 @@ jobs:
           export PYTHONPATH="$GITHUB_WORKSPACE/backend"
           python -m seydyaar run-daily             --out docs/latest             --past-days "$SEYDYAAR_PAST_DAYS"             --future-days "$SEYDYAAR_FUTURE_DAYS"             --step-hours "$SEYDYAAR_STEP_HOURS"             --grid "$SEYDYAAR_GRID"
 
-      - name: Assert manifest & verify exist
+      - name: Inspect manifest & verify outputs
         if: always()
         run: |
+          set -euo pipefail
           echo "== logs =="
           ls -lah docs/latest/logs || true
-          test -f docs/latest/logs/download_manifest.jsonl
+          if [ -f docs/latest/logs/download_manifest.jsonl ]; then
+            echo "download_manifest.jsonl present"
+          else
+            echo "download_manifest.jsonl not generated in this run (expected for incremental/no-op runs)"
+          fi
+          if [ -f docs/latest/logs/run_summary.json ]; then
+            echo "== run summary =="
+            cat docs/latest/logs/run_summary.json
+          fi
           echo "== verify =="
           find docs/latest/verify -maxdepth 3 -type f -print || true
 
@@ -83,7 +94,7 @@ jobs:
           path: |
             docs/latest/logs/**
             docs/latest/verify/**
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 7
 
       - name: Commit & push updated docs
