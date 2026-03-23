@@ -160,7 +160,12 @@ const state = {
   qcMaskCache: new Map(), // timeId-> Uint8Array
   // Rendering toggles
   renderFlipY: false,
+  dataNorthFirst: true, // ✅ row0 is NORTH (fixes flip confusion)
   boundsPad: true,
+  // Manual georeferencing tweak (degrees): shifts raster/click mapping without touching data
+  manualLatOffset: -0.27,
+  manualLonOffset: -0.01242,
+
 };
 
 // --- Click suppression for priority markers ---
@@ -195,12 +200,22 @@ function ensureGridBounds(){
     const b = pad
       ? [[latMin - dy/2, lonMin - dx/2],[latMax + dy/2, lonMax + dx/2]]
       : [[latMin, lonMin],[latMax, lonMax]];
+    // Apply manual offsets (if any)
+    const dLat = Number(state.manualLatOffset||0);
+    const dLon = Number(state.manualLonOffset||0);
+    if(dLat || dLon){
+      b[0][0] += dLat; b[1][0] += dLat;
+      b[0][1] += dLon; b[1][1] += dLon;
+    }
     g.bounds = b;
     return b;
   }
   const bb = g.bbox;
   if(Array.isArray(bb) && bb.length===4){
     const b = [[bb[1], bb[0]],[bb[3], bb[2]]];
+    const dLat = Number(state.manualLatOffset||0);
+    const dLon = Number(state.manualLonOffset||0);
+    if(dLat || dLon){ b[0][0]+=dLat; b[1][0]+=dLat; b[0][1]+=dLon; b[1][1]+=dLon; }
     g.bounds = b;
     return b;
   }
@@ -208,6 +223,35 @@ function ensureGridBounds(){
 }
 
 
+
+// Convert between grid pixel coords (x,y) and lat/lon using current bounds + flip
+function xyToLatLon(x, y){
+  const g = state.grid; if(!g) return null;
+  const W=g.width, H=g.height;
+  const b = ensureGridBounds(); if(!b) return null;
+  const south=b[0][0], west=b[0][1], north=b[1][0], east=b[1][1];
+  const xCl = Math.max(0, Math.min(W-1, x));
+  const yCl = Math.max(0, Math.min(H-1, y));
+    const yImg = state.dataNorthFirst ? yCl : (H-1 - yCl); // image-space y (0=north)
+  const fx = (W<=1) ? 0 : (xCl/(W-1));
+  const fy = (H<=1) ? 0 : (yImg/(H-1));
+  const lon = west + fx*(east-west);
+  const lat = north - fy*(north-south);
+  return {lat, lon};
+}
+function latLonToXY(lat, lon){
+  const g = state.grid; if(!g) return null;
+  const W=g.width, H=g.height;
+  const b = ensureGridBounds(); if(!b) return null;
+  const south=b[0][0], west=b[0][1], north=b[1][0], east=b[1][1];
+  if(lat<south || lat>north || lon<west || lon>east) return null;
+  const fx = (lon - west) / (east - west);
+  const fyN = (north - lat) / (north - south); // image y (0=north)
+  const x = Math.max(0, Math.min(W-1, Math.round(fx*(W-1))));
+  const yImg = Math.max(0, Math.min(H-1, Math.round(fyN*(H-1))));
+    const y = state.dataNorthFirst ? yImg : (H-1 - yImg);
+  return {x,y,i:y*W+x};
+}
 
 function fmtTime(isoZ){
   try{
@@ -569,18 +613,7 @@ function openInfoPopup(latlng, html){
 }
 
 function gridIndexFromLatLon(lat, lon){
-  const g = state.grid; if(!g) return null;
-  const W=g.width, H=g.height;
-  const b = ensureGridBounds(); if(!b) return null;
-  const south=b[0][0], west=b[0][1], north=b[1][0], east=b[1][1];
-  if(lat<south || lat>north || lon<west || lon>east) return null;
-
-  const fx = (lon - west) / (east - west);
-  const fyN = (north - lat) / (north - south); // 0 at north, 1 at south (image y)
-  const x = Math.max(0, Math.min(W-1, Math.round(fx*(W-1))));
-  const yImg = Math.max(0, Math.min(H-1, Math.round(fyN*(H-1))));
-  const y = state.renderFlipY ? (H-1 - yImg) : yImg;
-  return {x,y,i:y*W+x};
+  return latLonToXY(lat, lon);
 }
 
 function rankFromPercentile(pct){
@@ -936,8 +969,9 @@ function buildClustersContour(){
     let peak={v:-1, lat:0, lon:0};
     for(const ii of c.cells){
       const y=Math.floor(ii/W), x=ii - y*W;
-      const lat = g.lat_max - (g.lat_max-g.lat_min)*(y/(H-1));
-      const lon = g.lon_min + (g.lon_max-g.lon_min)*(x/(W-1));
+      const ll = xyToLatLon(x,y) || {lat:NaN, lon:NaN};
+    const lat = ll.lat;
+    const lon = ll.lon;
       const v = state.lastComputed.arrAgg[ii];
       sum += v; latSum += lat; lonSum += lon;
       if(v>mx) mx=v;
@@ -1082,11 +1116,11 @@ function renderClusters(infos, thrVal, mode){
   const clusterTops=[];
   infos.forEach(info=>{
     if(!info.poly || info.poly.length<3) return;
-    const poly = L.polygon(info.poly.map(p=>[p.lat,p.lon]), {pane:"clusterPane", color: info.id===bestId ? "#F1C40F" : "#ff2d2d", weight:2, fillOpacity:0.08});
+    const poly = L.polygon(info.poly.map(p=>[p.lat,p.lon]), {pane:"clusterPane", color:"#ff0000", weight:2, fillOpacity:0.08});
     poly.on("click", (e)=>{ try{ suppressNextMapClick(); L.DomEvent.stop(e); }catch(_){ } selectCluster(info); });
     polys.push(poly);
 
-    const c = L.circleMarker([info.center.lat, info.center.lon], {pane:"clusterTopPane", radius:6, weight:2, color:"#ffffff", fillColor: info.id===bestId ? "#F1C40F" : "#ff2d2d", fillOpacity:0.9});
+    const c = L.circleMarker([info.center.lat, info.center.lon], {pane:"clusterTopPane", radius:6, weight:2, color:"#ffffff", fillColor:"#ff0000", fillOpacity:0.9});
     c.on("click", (e)=>{ try{ L.DomEvent.stopPropagation(e); }catch(_){}; selectCluster(info); });
     centers.push(c);
 
@@ -1095,8 +1129,8 @@ function renderClusters(infos, thrVal, mode){
       const icon = L.divIcon({
         className:"",
         html:`<div class="rankDot small">${j+1}</div>`,
-        iconSize:[22,22],
-        iconAnchor:[11,11]
+        iconSize:[18,18],
+        iconAnchor:[9,9]
       });
       const mk = L.marker([p.lat, p.lon], {icon, pane:"clusterTopPane", bubblingMouseEvents:false, bubblingPointerEvents:false});
       mk.on("click", (e)=>{ try{ L.DomEvent.stopPropagation(e); }catch(_){}; showPointPopup(p.lat, p.lon, {kind:"cluster-top", clusterId:info.id, rank:j+1}); });
@@ -1122,6 +1156,16 @@ function renderClusters(infos, thrVal, mode){
   }else{
     toast(lang==="fa" ? "هیچ خوشه‌ای پیدا نشد" : "No clusters found", "info", "Clusters");
   }
+}
+
+
+function clearClusters(){
+  try{ if(clusterLayer){ clusterLayer.remove(); } }catch(_){}
+  try{ if(clusterCenters){ clusterCenters.remove(); } }catch(_){}
+  try{ if(clusterTopLayer){ clusterTopLayer.remove(); } }catch(_){}
+  clusterLayer=null; clusterCenters=null; clusterTopLayer=null;
+  const listEl = $("clusterList");
+  if(listEl) listEl.innerHTML="";
 }
 
 function selectCluster(info){
@@ -1235,15 +1279,13 @@ map.on("moveend", ()=>{ try{ drawGrid05(); }catch(_){} });
   map.on("mousemove", (e)=>{
     try{
       if(!state.lastComputed?.arrShown) return;
+      const xy = latLonToXY(e.latlng.lat, e.latlng.lng);
+      if(!xy) return;
       const g = state.grid;
       const W=g.width, H=g.height;
       const lat=e.latlng.lat, lon=e.latlng.lng;
-      if(lat<g.lat_min || lat>g.lat_max || lon<g.lon_min || lon>g.lon_max) return;
-
-      const fx = (lon - g.lon_min) / (g.lon_max - g.lon_min);
-      const fy = (g.lat_max - lat) / (g.lat_max - g.lat_min);
-      const x = Math.max(0, Math.min(W-1, Math.round(fx*(W-1))));
-      const y = Math.max(0, Math.min(H-1, Math.round(fy*(H-1))));
+      const x = xy.x;
+      const y = xy.y;
       const v = state.lastComputed.arrShown[y*W+x];
       if(!Number.isFinite(v)) return;
       const p = percentileOfValue(v);
@@ -1270,6 +1312,7 @@ $("exportClustersBtn")?.addEventListener("click", ()=>{
 });
 
 $("clusterBtn")?.addEventListener("click", ()=>{ try{ buildClusters(); }catch(e){ console.error(e); } });
+$("clusterClearBtn")?.addEventListener("click", ()=>{ try{ clearClusters(); }catch(e){ console.error(e); } });
 
 $("exportTopBtn")?.addEventListener("click", ()=>{
   const top = state.lastComputed?.topFiltered || [];
@@ -1342,11 +1385,49 @@ $("playBtnBottom")?.addEventListener("click", ()=>{
 /* ------------------------------
    Colormap (RdYlGn-like)
 ------------------------------ */
-const stops = [
-  {p:0.00, c:[40, 30, 120]},   // deep indigo
-  {p:0.55, c:[46, 204, 113]}, // green
-  {p:1.00, c:[241, 196, 15]}, // yellow
-];
+// Palette (stops) can change per layer/map. Default is blue→green→yellow.
+const PALETTES = {
+  default: [
+    {p:0.00, c:[40, 30, 120]},   // indigo
+    {p:0.55, c:[46, 204, 113]},  // green
+    {p:1.00, c:[241, 196, 15]},  // yellow
+  ],
+  conf: [
+    {p:0.00, c:[10, 10, 10]},    // near-black
+    {p:1.00, c:[240, 240, 240]}, // near-white
+  ],
+  spread: [
+    {p:0.00, c:[32, 26, 96]},    // deep blue-purple
+    {p:0.60, c:[46, 204, 113]},  // green
+    {p:1.00, c:[241, 196, 15]},  // yellow
+  ],
+  agree: [
+    {p:0.00, c:[32, 26, 96]},
+    {p:0.60, c:[46, 204, 113]},
+    {p:1.00, c:[241, 196, 15]},
+  ],
+};
+
+function getStopsForMap(mapKey){
+  // If meta provides palette, prefer it (optional).
+  try{
+    const s = state?.meta?.palettes?.[mapKey];
+    if(Array.isArray(s) && s.length>=2) return s;
+  }catch(_){}
+  return PALETTES[mapKey] || PALETTES.default;
+}
+
+function stopsToCssGradient(stops){
+  const parts = (stops||[]).map(s=>{
+    const [r,g,b]=s.c;
+    return `rgb(${r},${g},${b}) ${Math.round(s.p*100)}%`;
+  });
+  return `linear-gradient(to top, ${parts.join(", ")})`;
+}
+
+let stops = getStopsForMap(state?.map||'default');
+function refreshStops(){ stops = getStopsForMap(state?.map||'default'); }
+
 function lerp(a,b,t){return a+(b-a)*t}
 function colorFor(v01){
   // Dynamic scaling per selection (AOI + current layer)
@@ -1449,8 +1530,8 @@ function setLegend(title){
   el.innerHTML = `
     <div class="wrap">
       <div class="title">${title}${mm}</div>
-      <div style="display:flex; gap:10px; align-items:stretch;">
-        <div class="bar"></div>
+	      <div style="display:flex; gap:10px; align-items:stretch;">
+	        <div class="bar" style="background:${stopsToCssGradient(getStopsForMap(state.map || 'default'))}"></div>
         <div class="ticks">${tickHtml}</div>
       </div>
     </div>
@@ -1472,7 +1553,7 @@ function renderOverlay(arr01, conf01){
   const N = W*H;
 
   for(let yImg=0;yImg<H;yImg++){
-    const ySrc = state.renderFlipY ? (H-1 - yImg) : yImg;
+        const ySrc = state.dataNorthFirst ? yImg : (H-1 - yImg);
     for(let x=0;x<W;x++){
       const iSrc = ySrc*W + x;
       const v = arr01[iSrc];
@@ -1753,6 +1834,7 @@ function renderFromCache(){
   const arrShown = applyFilterMaskToArray(arrAgg);
   const confShown = (confAgg && confAgg.length===arrShown.length) ? confAgg : new Float32Array(arrShown.length).fill(1);
 
+  refreshStops();
   setLegend(mapTitle());
   renderOverlay(arrShown, confShown);
 
@@ -2522,11 +2604,17 @@ function getSelectedTimeId(){
 // ---- Debug / console helpers (so claims are testable) ----
 window.state = state;
 window.__SY = window.__SY || {};
-window.__SY.version = "ui-debug-v4";
-window.__SY.setFlipY = (v)=>{ state.renderFlipY = !!v; try{ renderFromCache(); }catch(_){} };
+window.__SY.version = "ui-align-v6";
+window.__SY.setFlipY = (v)=>{ state.dataNorthFirst = !!v; try{ renderFromCache(); }catch(_){} }; // true => row0 NORTH
+window.__SY.setRenderFlipY = (v)=>{ state.dataNorthFirst = ! (!!v); try{ renderFromCache(); }catch(_){} }; // legacy: true => row0 SOUTH
 window.__SY.setBoundsPad = (v)=>{ state.boundsPad = !!v; try{ if(state.grid) state.grid.bounds=null; ensureGridBounds(); renderFromCache(); }catch(_){} };
+window.__SY.setOffsets = (dLat, dLon)=>{ state.manualLatOffset = Number(dLat||0); state.manualLonOffset = Number(dLon||0); try{ if(state.grid) state.grid.bounds=null; ensureGridBounds(); renderFromCache(); }catch(e){ console.error(e);} };
 window.__SY.suppress = (ms=250)=>{ suppressNextMapClick(ms); return state.__suppressMapClickUntil; };
 window.__SY.getSuppress = ()=> state.__suppressMapClickUntil;
+
+window.__SY.xyToLatLon = xyToLatLon;
+window.__SY.latLonToXY = latLonToXY;
+
 
 window._gridIndexFromLatLon = gridIndexFromLatLon;
 window._rankFromPercentile = (typeof rankFromPercentile==="function") ? rankFromPercentile : ((x)=>null);
