@@ -1,0 +1,509 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Seyd‑Yaar App</title>
+  <link rel="manifest" href="manifest.json" />
+  <meta name="theme-color" content="#03243b" />
+  <link rel="icon" href="assets/logo.png" />
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="vendor/leaflet-draw/leaflet.draw.css" />
+
+  <!-- Leaflet -->
+  <link rel="stylesheet" href="vendor/leaflet/leaflet.css" />
+</head>
+<body class="ocean appPage">
+  <div class="bgPhoto" aria-hidden="true"></div>
+  <div class="bgVignette" aria-hidden="true"></div>
+
+  <header class="topbar glass">
+    <div class="topLeft">
+      <button id="langToggle" class="chip">FA / EN</button>
+      <button id="themeToggle" class="chip" title="Dark/Light">🌙</button>
+    </div>
+    <div class="brand">
+      <div class="title">Seyd‑Yaar</div>
+      <div class="subtitle" id="subtitle">Catch Probability (Habitat × Ops) + Uncertainty</div>
+    </div>
+    <div class="logoWrap">
+      <img class="logo spinFloat" src="assets/logo.png" alt="Seyd-Yaar logo" />
+    </div>
+  </header>
+
+  <div class="waveStrip" aria-hidden="true"></div>
+
+  <div id="offlineMapHint" class="offlineMapHint" hidden>Offline map mode is active — local renderer and local libraries are loaded.</div>
+
+  <main class="appLayout">
+    <aside class="panel glass" id="panel">
+      <div class="sheetHandle" id="sheetHandle" aria-hidden="true"></div>
+      <div class="row" id="rowRun" style="display:none;">
+        <label class="lbl" id="lblRun">Run</label>
+        <select id="runSelect"></select>
+      </div>
+
+      <div class="row">
+        <label class="lbl" id="lblVariant">QC / Gap‑Fill</label>
+        <select id="variantSelect"></select>
+      </div>
+
+      <div class="row">
+        <label class="lbl" id="lblSpecies">Species</label>
+        <select id="speciesSelect">
+          <option value="skipjack">Skipjack</option>
+          <option value="yellowfin">Yellowfin</option>
+        </select>
+      </div>
+
+      <div class="row">
+        <label class="lbl" id="lblModel">Model</label>
+        <select id="modelSelect">
+
+          <option value="ensemble">Ensemble (default)</option>
+          <option value="hybrid">Hybrid (HSI + ENM)</option>
+          <option value="scoring">Scoring (HSI)</option>
+          <option value="frontplus">Front+ (Scoring)</option>
+          <option value="frontboost">FrontBoost (1.2×)</option>
+          <option value="ppp">MaxEnt/PPP (needs data)</option>
+        </select>
+      </div>
+
+      <div class="row">
+        <label class="lbl" id="lblMap">Map</label>
+        <select id="mapSelect">
+
+          <option value="pcatch">Pcatch (Habitat×Ops)</option>
+          <option value="phab">Habitat (selected model)</option>
+          <option value="pops">Operational Feasibility</option>
+          <option value="front">Front intensity (best)</option>
+          <option value="front_boa">Front BOA</option>
+          <option value="front_gradient">Front gradient</option>
+          <option value="front_cca">Front CCA-lite</option>
+          <option value="front_gradhist">Front GRADHIST-lite</option>
+          <option value="front_fused">Front fused</option>
+          <option value="sst">SST</option>
+          <option value="chl">Chl</option>
+          <option value="current">Current speed</option>
+          <option value="waves">Wave height</option>
+          <option value="sss">Salinity (SSS)</option>
+          <option value="o2">Oxygen</option>
+          <option value="mld">Mixed layer depth</option>
+          <option value="thermocline">Thermocline proxy</option>
+          <option value="oxygen_access">Oxygen accessibility</option>
+          <option value="npp">Net primary production</option>
+          <option value="agree">Agreement (ensemble)</option>
+          <option value="spread">Spread/Std (ensemble)</option>
+          <option value="conf">Confidence / Opacity</option>
+          <option value="wind_speed">Wind speed</option>
+          <option value="wind_direction">Wind direction</option>
+          <option value="setline_score">Best setline score</option>
+          <option value="setline_heading">Best setline heading</option>
+        </select>
+      </div>
+
+      <div class="row">
+        <label class="lbl" id="lblAgg">Aggregation</label>
+        <select id="aggSelect">
+          <option value="p90" selected>P90 (default)</option>
+          <option value="mean">Mean</option>
+          <option value="median">Median</option>
+          <option value="max">Max</option>
+        </select>
+      </div>
+
+
+      <div class="row">
+        <label class="lbl">Depth analysis</label>
+        <select id="depthSelect">
+          <option value="weighted" selected>Weighted 0–12 m</option>
+          <option value="0">0 m</option>
+          <option value="4">4 m</option>
+          <option value="8">8 m</option>
+          <option value="12">12 m</option>
+        </select>
+      </div>
+      <div class="row two">
+        <div>
+          <label class="lbl" id="lblFrom">From</label>
+          <select id="t0Select"></select>
+        </div>
+        <div>
+          <label class="lbl" id="lblTo">To</label>
+          <select id="t1Select"></select>
+        </div>
+      </div>
+
+      <div class="row two">
+        <button id="playBtn" class="btnPrimary">▶ Play</button>
+        <select id="stepSelect">
+          <option value="6" selected>6h</option>
+          <option value="12">12h</option>
+          <option value="24">24h</option>
+        </select>
+      </div>
+      <div class="row three">
+        <label class="chk">
+          <input type="checkbox" id="pinToggle" />
+          <span title="On click, drop a pin marker and keep it.">Pin on click</span>
+        </label>
+
+        <label class="chk">
+          <input type="checkbox" id="autoAnalyzeToggle" checked />
+          <span>Auto‑Analyze</span>
+        </label>
+        <label class="chk">
+          <input type="checkbox" id="gridToggle" />
+          <span>Grid 0.5°</span>
+        </label>
+        <label class="chk">
+          <input type="checkbox" id="avgToggle" />
+          <span>Average (range)</span>
+        </label>
+      </div>
+
+      <div class="row">
+        <label class="lbl">AOI</label>
+        <div class="aoiRow">
+          <select id="aoiMode">
+            <option value="full" selected>Full (dataset)</option>
+            <option value="view">Current view</option>
+            <option value="draw">Draw rectangle</option>
+          </select>
+          <button id="aoiDrawBtn" class="btnGhost">Draw</button>
+          <button id="aoiClearBtn" class="btnGhost">Clear</button>
+        </div>
+      </div>
+
+      <div class="row">
+        <label class="lbl">Clustering (DBSCAN)</label>
+        
+        <div class="clusterRow">
+          <select id="clusterMethod" title="Clustering method">
+            <option value="contour" selected>Contour (connected areas)</option>
+            <option value="dbscan">DBSCAN (point density)</option>
+          </select>
+
+          <select id="clusterThreshold" title="Minimum probability to include in clustering (current layer)">
+            <option value="90">≥ 90%</option>
+            <option value="85" selected>≥ 85%</option>
+            <option value="80">≥ 80%</option>
+            <option value="75">≥ 75%</option>
+            <option value="70">≥ 70%</option>
+          </select>
+
+          <input id="clusterEpsKm" type="number" min="1" step="1" value="25" title="DBSCAN eps (km)" />
+          <input id="clusterMinPts" type="number" min="2" step="1" value="6" title="Min points / Min cells" />
+
+          <select id="clusterCenterMode" title="Cluster center definition">
+            <option value="weighted" selected>Center: weighted</option>
+            <option value="centroid">Center: centroid</option>
+            <option value="peak">Center: peak</option>
+          </select>
+
+          <button id="clusterBtn" class="btnPrimary">Cluster</button>
+        </div>
+
+        <div class="hintSmall">Threshold is absolute probability (current layer). MinPts = minimum size (cells) for Contour mode.</div>
+
+        <div class="weights"><div class="weights">
+          <div class="wrow2">
+            <label>Preset</label>
+            <select id="weightPreset">
+              <option value="default" selected>Default (0.70 / 0.30 / 0.02)</option>
+              <option value="stable">Stability (Mean‑heavy)</option>
+              <option value="peak">Peak (Max‑heavy)</option>
+              <option value="wide">Wide (Area‑heavy)</option>
+            </select>
+            <button id="resetWeightsBtn" class="btnGhost" title="Reset to default">Reset</button>
+          </div>
+
+          <div class="wrowNum">
+            <span>Mean</span>
+            <input id="wMeanNum" type="number" step="0.05" min="0" max="1" value="0.70" />
+          </div>
+          <div class="wrowNum">
+            <span>Max</span>
+            <input id="wMaxNum" type="number" step="0.05" min="0" max="1" value="0.30" />
+          </div>
+          <div class="wrowNum">
+            <span>Area</span>
+            <input id="wAreaNum" type="number" step="0.05" min="0" max="1" value="0.02" />
+          </div>
+          <div class="hintSmall">Weights auto‑normalize (sum=1). Area uses log(1+Area).</div>
+        </div>
+      </div>
+      <div class="clusterList" id="clusterList"></div>
+
+      </div>
+
+      <div class="row">
+        <button id="exportClustersBtn" class="btnGhost">Export clusters (JSON)</button>
+        <button id="exportTopBtn" class="btnGhost">Export top points (CSV)</button>
+        <button id="exportPinsBtn" class="btnGhost">Export pins (CSV)</button>
+      </div>
+
+
+
+      <div class="row">
+        <label class="lbl">Lookback</label>
+        <select id="lookbackSelect">
+          <option value="0" selected>Manual range</option>
+          <optgroup label="Past (avg)">
+            <option value="1">Avg last 1 day</option>
+            <option value="2">Avg last 2 days</option>
+            <option value="3">Avg last 3 days</option>
+            <option value="4">Avg last 4 days</option>
+            <option value="5">Avg last 5 days</option>
+            <option value="6">Avg last 6 days</option>
+            <option value="7">Avg last 7 days</option>
+          </optgroup>
+          <optgroup label="Future (avg)">
+            <option value="-1">Avg next 1 day</option>
+            <option value="-2">Avg next 2 days</option>
+            <option value="-3">Avg next 3 days</option>
+            <option value="-4">Avg next 4 days</option>
+            <option value="-5">Avg next 5 days</option>
+            <option value="-6">Avg next 6 days</option>
+            <option value="-7">Avg next 7 days</option>
+            <option value="-10">Avg next 10 days</option>
+          </optgroup>
+        </select>
+      </div>
+
+      <div class="row">
+        <button id="analyzeBtn" class="btnNeon">Analyze ▶</button>
+        <span id="dirtyHint" class="muted small">Change settings, then press Analyze.</span>
+      </div>
+
+      <div class="row">
+        <div id="availabilityInfo" class="details small"></div>
+      </div>
+
+      <div class="row">
+        <label class="lbl">QC Mask (Chl)</label>
+        <label class="switch">
+          <input type="checkbox" id="qcToggle" checked />
+          <span class="slider"></span>
+        </label>
+        <span class="muted small" id="qcHint">Masks low‑quality pixels (opacity)</span>
+      </div>
+
+      <div class="row">
+        <label class="lbl">Gap‑fill</label>
+        <label class="switch">
+          <input type="checkbox" id="gapToggle" />
+          <span class="slider"></span>
+        </label>
+        <span class="muted small" id="gapHint">Uses precomputed gap‑filled variant</span>
+      </div>
+
+      <div class="divider"></div>
+
+      <details class="details" open>
+        <summary>AOI (Analysis area)</summary>
+        <div class="row">
+          <input id="aoiFile" type="file" accept=".geojson,application/geo+json,application/json" />
+        </div>
+        <div class="row">
+          <textarea id="aoiText" rows="6" placeholder="Paste GeoJSON here…"></textarea>
+        </div>
+        <div class="row two">
+          <button id="useAoiBtn" class="btnPrimary">Use AOI</button>
+          <button id="clearAoiBtn" class="btnGhost">Clear</button>
+        </div>
+        <div class="row two">
+          <input id="bboxLatMin" placeholder="Lat min" />
+          <input id="bboxLatMax" placeholder="Lat max" />
+        </div>
+        <div class="row two">
+          <input id="bboxLonMin" placeholder="Lon min" />
+          <input id="bboxLonMax" placeholder="Lon max" />
+        </div>
+        <div class="row">
+          <button id="useBboxBtn" class="btnGhost">Use BBOX as AOI</button>
+          <span id="aoiStatus" class="muted small">AOI: none</span>
+        </div>
+        <div class="row">
+          <textarea id="aoiPoints" rows="4" placeholder="Points (lat,lon per line)
+Example:
+24.5,59.1
+24.7,59.3
+..."></textarea>
+        </div>
+        <div class="row">
+          <button id="usePointsBtn" class="btnGhost">Build Polygon from Points</button>
+        </div>
+
+        <div class="muted small">Tip: use the draw tool on the map (polygon/rectangle). It will auto-fill the GeoJSON box.</div>
+      </details>
+
+      <details class="details">
+        <summary>AOI (Filter results after analysis)</summary>
+        <div class="row">
+          <input id="filterAoiFile" type="file" accept=".geojson,application/geo+json,application/json" />
+        </div>
+        <div class="row">
+          <textarea id="filterAoiText" rows="5" placeholder="Paste GeoJSON filter AOI…"></textarea>
+        </div>
+        <div class="row two">
+          <button id="useFilterAoiBtn" class="btnPrimary">Use Filter AOI</button>
+          <button id="clearFilterAoiBtn" class="btnGhost">Clear</button>
+        </div>
+        <div class="row two">
+          <input id="filterBboxLatMin" placeholder="Lat min" />
+          <input id="filterBboxLatMax" placeholder="Lat max" />
+        </div>
+        <div class="row two">
+          <input id="filterBboxLonMin" placeholder="Lon min" />
+          <input id="filterBboxLonMax" placeholder="Lon max" />
+        </div>
+        <div class="row">
+          <button id="useFilterBboxBtn" class="btnGhost">Use BBOX as Filter AOI</button>
+          <span id="filterAoiStatus" class="muted small">Filter: none</span>
+        </div>
+        <div class="row">
+          <textarea id="filterAoiPoints" rows="4" placeholder="Filter Points (lat,lon per line)
+Example:
+24.5,59.1
+24.7,59.3
+..."></textarea>
+        </div>
+        <div class="row">
+          <button id="useFilterPointsBtn" class="btnGhost">Build Filter Polygon from Points</button>
+        </div>
+
+      </details>
+
+      <details class="details" open>
+        <summary>Top‑100 filter</summary>
+        <div class="row">
+          <label class="lbl">Min P%</label>
+          <input id="minP" type="range" min="0" max="100" value="0" />
+          <span id="minPVal" class="muted small">0%</span>
+        </div>
+        <div class="row">
+          <label class="lbl">Show</label>
+          <select id="topLimit">
+            <option value="10">Top‑10</option>
+            <option value="25">Top‑25</option>
+            <option value="50">Top‑50</option>
+            <option value="100" selected>Top‑100</option>
+          </select>
+        </div>
+      </details>
+
+      <div class="row">
+        <button id="downloadPngBtn" class="btnGhost">Download PNG</button>
+        <button id="downloadGeoBtn" class="btnGhost">Download GeoJSON</button>
+      </div>
+
+      <div class="row">
+        <button id="feedbackBtn" class="btnNeon">+ Feedback</button>
+        <button id="exportFbBtn" class="btnGhost">Export feedback</button>
+      </div>
+
+      <div class="divider"></div>
+
+      <details class="details" open>
+        <summary id="sumTop">Hotspots (Map: Top‑10 • Table: Top‑100)</summary>
+        <div id="top10Table" class="tableWrap"></div>
+      </details>
+
+      <details class="details">
+        <summary id="sumProfile">Species Profile (Explainable)</summary>
+        <div id="profileBox" class="profileBox"></div>
+      </details>
+
+      <details class="details">
+        <summary id="sumAudit">Audit / meta.json</summary>
+        <pre id="auditBox" class="auditBox"></pre>
+      </details>
+
+      <div class="footerMini">
+        <div>Designed by: عباس آسکانی - Abbas Askani</div>
+        <div class="bigCompanyMini">Askani Fishing Data company</div>
+      </div>
+    </aside>
+
+    <section class="mapWrap glass">
+      <div id="map"></div>
+      <div id="legend" class="legend glass"></div>
+    </section>
+  </main>
+
+  <!-- Feedback modal -->
+  <div id="modal" class="modal hidden">
+    <div class="modalCard glass">
+      <div class="modalHeader">
+        <div class="modalTitle" id="fbTitle">Feedback</div>
+        <button id="closeModal" class="chip">✕</button>
+      </div>
+      <div class="modalBody">
+        <div class="row">
+          <label class="lbl" id="fbLblRating">Rating</label>
+          <select id="fbRating">
+            <option value="excellent">Excellent</option>
+            <option value="good">Good</option>
+            <option value="ok">OK</option>
+            <option value="bad">Bad</option>
+            <option value="very_bad">Very bad</option>
+          </select>
+        </div>
+        <div class="row two">
+          <div>
+            <label class="lbl">Lat</label>
+            <input id="fbLat" type="number" step="0.0001" />
+          </div>
+          <div>
+            <label class="lbl">Lon</label>
+            <input id="fbLon" type="number" step="0.0001" />
+          </div>
+        </div>
+        <div class="row">
+          <label class="lbl" id="fbLblDepth">Gear depth (m)</label>
+          <select id="fbDepth">
+            <option>5</option><option selected>10</option><option>15</option><option>20</option>
+          </select>
+        </div>
+        <div class="row">
+          <label class="lbl" id="fbLblNotes">Notes (optional)</label>
+          <textarea id="fbNotes" rows="3" placeholder="..."></textarea>
+        </div>
+        <div class="row">
+          <button id="saveFbBtn" class="btnPrimary">Save locally</button>
+          <div class="muted small" id="fbHint">Saved to IndexedDB. Anti‑spam: rate‑limit + basic validation.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="toastHost" class="toastHost" aria-live="polite" aria-atomic="true"></div>
+
+  <script src="vendor/leaflet/leaflet.js"></script>
+  <script src="vendor/leaflet-draw/leaflet.draw.js"></script>
+  <script src="app.js"></script>
+  <script>
+    if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
+  </script>
+
+  <div id="timeBar">
+    <button id="playBtnBottom" class="btnPrimary">▶</button>
+    <div class="timeInfo">
+      <div id="timeNowLabel">—</div>
+      <div class="timeModeHint">Single time (use slider) • Turn on “Average” for range</div>
+    </div>
+    <input id="timeSlider" type="range" min="0" max="0" value="0" step="1" />
+  </div>
+
+  <div id="detailsModal" class="modal hidden">
+    <div class="modalCard">
+      <div class="modalHeader">
+        <div id="detailsModalTitle">Details</div>
+        <button id="detailsModalClose" class="btnGhost">✕</button>
+      </div>
+      <div id="detailsModalBody" class="modalBody"></div>
+    </div>
+  </div>
+</body>
+</html>
