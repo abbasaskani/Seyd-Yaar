@@ -27,7 +27,9 @@
       "current_decay_per_m": 0.018,
       "wave_decay_per_m": 0.06,
       "mld_pref_m": 35.0,
-      "mld_sigma_m": 20.0
+      "mld_sigma_m": 20.0,
+      "lagrangian_horizon_hours": 72.0,
+      "lagrangian_step_hours": 24.0
     },
     "layer_weights": {
       "temp": 0.3,
@@ -39,7 +41,9 @@
       "o2": 0.06,
       "thermo": 0.05,
       "oxy_access": 0.06,
-      "npp": 0.04
+      "npp": 0.04,
+      "eddy": 0.0,
+      "lagrangian": 0.0
     },
     "ops_constraints": {
       "waves_hs_soft_max_m": 1.5,
@@ -81,7 +85,9 @@
       "current_decay_per_m": 0.018,
       "wave_decay_per_m": 0.06,
       "mld_pref_m": 45.0,
-      "mld_sigma_m": 20.0
+      "mld_sigma_m": 20.0,
+      "lagrangian_horizon_hours": 72.0,
+      "lagrangian_step_hours": 24.0
     },
     "layer_weights": {
       "temp": 0.32,
@@ -93,7 +99,9 @@
       "o2": 0.06,
       "thermo": 0.05,
       "oxy_access": 0.06,
-      "npp": 0.04
+      "npp": 0.04,
+      "eddy": 0.0,
+      "lagrangian": 0.0
     },
     "ops_constraints": {
       "waves_hs_soft_max_m": 1.5,
