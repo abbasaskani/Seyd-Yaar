@@ -89,7 +89,7 @@ from dateutil import tz
 from ..utils_geo import bbox_from_geojson, GridSpec, mask_from_geojson
 from ..utils_time import trusted_utc_now, timestamps_for_range
 from ..utils_time import time_id_from_iso
-from ..models.scoring import HabitatInputs, habitat_scoring, gradient_magnitude, front_score, front_feature_stack
+from ..models.scoring import HabitatInputs, habitat_scoring, gradient_magnitude, front_score, front_feature_stack, ameda_track_score
 from ..models.ops import ops_feasibility
 from ..models.ensemble import ensemble_stats
 from .io import write_bin_f32, write_bin_u8, write_json, minify_json_for_web
@@ -151,8 +151,8 @@ def _try_local_era5_wind(grid: GridSpec, day_utc: datetime, datasets_cfg: Dict[s
         u2 = np.asarray(u.values, dtype=np.float32)
         v2 = np.asarray(v.values, dtype=np.float32)
         # map target grid by nearest coordinates
-        yi = np.abs(lats[:,None] - _grid_lats(grid)[None,:]).argmin(axis=0) if lats.ndim==1 else None
-        xi = np.abs(lons[:,None] - _grid_lons(grid)[None,:]).argmin(axis=0) if lons.ndim==1 else None
+        yi = np.abs(lats[:,None] - grid.lats[None,:]).argmin(axis=0) if lats.ndim==1 else None
+        xi = np.abs(lons[:,None] - grid.lons[None,:]).argmin(axis=0) if lons.ndim==1 else None
         if yi is None or xi is None:
             return None
         out_u = u2[np.ix_(yi, xi)]
@@ -163,34 +163,10 @@ def _try_local_era5_wind(grid: GridSpec, day_utc: datetime, datasets_cfg: Dict[s
     except Exception:
         return None
 
-def _grid_lons(grid: GridSpec) -> np.ndarray:
-    vals = getattr(grid, "lons", None)
-    if vals is not None:
-        return np.asarray(vals, dtype=np.float32)
-    return np.linspace(float(grid.lon_min), float(grid.lon_max), int(grid.width), dtype=np.float32)
-
-
-def _grid_lats(grid: GridSpec) -> np.ndarray:
-    vals = getattr(grid, "lats", None)
-    if vals is not None:
-        return np.asarray(vals, dtype=np.float32)
-    return np.linspace(float(grid.lat_max), float(grid.lat_min), int(grid.height), dtype=np.float32)
-
-
-def _safe_stack_nanmean(arrays: List[np.ndarray]) -> np.ndarray:
-    stack = np.stack(arrays, axis=0).astype(np.float32)
-    valid = np.isfinite(stack)
-    count = valid.sum(axis=0)
-    summed = np.where(valid, stack, 0.0).sum(axis=0, dtype=np.float32)
-    out = np.full(stack.shape[1:], np.nan, dtype=np.float32)
-    np.divide(summed, count, out=out, where=count > 0)
-    return out.astype(np.float32)
-
-
 def _setline_summary(grid: GridSpec, pcatch: np.ndarray, wind_dir_deg_to: np.ndarray, length_nm: float = 10.0) -> Dict[str, Any]:
     idx = int(np.nanargmax(np.where(np.isfinite(pcatch), pcatch, -1.0)))
     r, c = divmod(idx, grid.width)
-    lon = float(_grid_lons(grid)[c]); lat = float(_grid_lats(grid)[r])
+    lon = float(grid.lons[c]); lat = float(grid.lats[r])
     wind_to = float(wind_dir_deg_to[r, c])
     heading = (wind_to + 90.0) % 180.0
     length_deg_lon = (length_nm * 1.852) / max(111.32 * np.cos(np.deg2rad(lat)), 1e-6)
@@ -565,6 +541,10 @@ def _write_latest_index_and_meta(out_root: Path, run_entry: Dict[str, Any], vari
     idx_out = out_root / "index.json"
     write_json(idx_out, index)
     minify_json_for_web(idx_out)
+    latest_dir = out_root / "latest"
+    latest_dir.mkdir(parents=True, exist_ok=True)
+    write_json(latest_dir / "index.json", index)
+    minify_json_for_web(latest_dir / "index.json")
 
     meta = {
         "version": 1,
@@ -583,6 +563,8 @@ def _write_latest_index_and_meta(out_root: Path, run_entry: Dict[str, Any], vari
     meta_out = out_root / "meta.json"
     write_json(meta_out, meta)
     minify_json_for_web(meta_out)
+    write_json(latest_dir / "meta.json", meta)
+    minify_json_for_web(latest_dir / "meta.json")
 
 
 def run_daily(
@@ -693,6 +675,31 @@ def run_daily(
                     "front_cca": f"variants/{variant}/species/{sp}/times/{{time}}/front_cca_f32.bin",
                     "front_gradhist": f"variants/{variant}/species/{sp}/times/{{time}}/front_gradhist_f32.bin",
                     "front_fused": f"variants/{variant}/species/{sp}/times/{{time}}/front_fused_f32.bin",
+                    "eddy_eke": f"variants/{variant}/species/{sp}/times/{{time}}/eddy_eke_f32.bin",
+                    "eddy_vorticity": f"variants/{variant}/species/{sp}/times/{{time}}/eddy_vorticity_f32.bin",
+                    "eddy_strain": f"variants/{variant}/species/{sp}/times/{{time}}/eddy_strain_f32.bin",
+                    "eddy_okubo_weiss": f"variants/{variant}/species/{sp}/times/{{time}}/eddy_okubo_weiss_f32.bin",
+                    "eddy_core": f"variants/{variant}/species/{sp}/times/{{time}}/eddy_core_f32.bin",
+                    "eddy_edge_distance": f"variants/{variant}/species/{sp}/times/{{time}}/eddy_edge_distance_f32.bin",
+                    "eddy_polarity": f"variants/{variant}/species/{sp}/times/{{time}}/eddy_polarity_f32.bin",
+                    "eddy_amplitude": f"variants/{variant}/species/{sp}/times/{{time}}/eddy_amplitude_f32.bin",
+                    "eddy_radius": f"variants/{variant}/species/{sp}/times/{{time}}/eddy_radius_f32.bin",
+                    "eddy_opportunity": f"variants/{variant}/species/{sp}/times/{{time}}/eddy_opportunity_f32.bin",
+                    "ameda_proxy": f"variants/{variant}/species/{sp}/times/{{time}}/ameda_proxy_f32.bin",
+                    "ameda_core": f"variants/{variant}/species/{sp}/times/{{time}}/ameda_core_f32.bin",
+                    "ameda_polarity": f"variants/{variant}/species/{sp}/times/{{time}}/ameda_polarity_f32.bin",
+                    "ameda_confidence": f"variants/{variant}/species/{sp}/times/{{time}}/ameda_confidence_f32.bin",
+                    "ameda_track_score": f"variants/{variant}/species/{sp}/times/{{time}}/ameda_track_score_f32.bin",
+                    "ftle": f"variants/{variant}/species/{sp}/times/{{time}}/ftle_f32.bin",
+                    "fsle": f"variants/{variant}/species/{sp}/times/{{time}}/fsle_f32.bin",
+                    "lavd": f"variants/{variant}/species/{sp}/times/{{time}}/lavd_f32.bin",
+                    "lcs_ridge": f"variants/{variant}/species/{sp}/times/{{time}}/lcs_ridge_f32.bin",
+                    "lagrangian_opportunity": f"variants/{variant}/species/{sp}/times/{{time}}/lagrangian_opportunity_f32.bin",
+                    "ftle_td": f"variants/{variant}/species/{sp}/times/{{time}}/ftle_td_f32.bin",
+                    "fsle_td": f"variants/{variant}/species/{sp}/times/{{time}}/fsle_td_f32.bin",
+                    "lavd_td": f"variants/{variant}/species/{sp}/times/{{time}}/lavd_td_f32.bin",
+                    "lcs_ridge_td": f"variants/{variant}/species/{sp}/times/{{time}}/lcs_ridge_td_f32.bin",
+                    "lagrangian_td_opportunity": f"variants/{variant}/species/{sp}/times/{{time}}/lagrangian_td_opportunity_f32.bin",
                     "conf": f"variants/{variant}/species/{sp}/times/{{time}}/conf_f32.bin",
                     "wind_speed": f"variants/{variant}/species/{sp}/times/{{time}}/wind_speed_f32.bin",
                     "wind_direction": f"variants/{variant}/species/{sp}/times/{{time}}/wind_direction_f32.bin",
@@ -706,7 +713,7 @@ def run_daily(
                 "ops": {"priors": ops_priors, "gear_depths_m": gear_depths_m},
             },
         }
-        for base_key in ["sst","chl","current","waves","sss","o2","mld","thermocline","oxygen_access","npp","front","front_gradient","front_boa","front_cca","front_gradhist","front_fused","agree","spread","conf","phab_scoring","pops","pcatch_scoring","pcatch_frontplus","pcatch_ensemble"]:
+        for base_key in ["sst","chl","current","waves","sss","o2","mld","thermocline","oxygen_access","npp","front","front_gradient","front_boa","front_cca","front_gradhist","front_fused","eddy_eke","eddy_vorticity","eddy_strain","eddy_okubo_weiss","eddy_core","eddy_edge_distance","eddy_polarity","eddy_amplitude","eddy_radius","eddy_opportunity","ameda_proxy","ameda_core","ameda_polarity","ameda_confidence","ftle","fsle","lavd","lcs_ridge","lagrangian_opportunity","ftle_td","fsle_td","lavd_td","lcs_ridge_td","lagrangian_td_opportunity","agree","spread","conf","phab_scoring","pops","pcatch_scoring","pcatch_frontplus","pcatch_ensemble"]:
             for d in DEPTH_TARGETS_M:
                 sp_meta["paths"]["per_time"][f"{base_key}_depth_{d}m"] = f"variants/{variant}/species/{sp}/times/{{time}}/{base_key}_depth_{d}m_f32.bin"
             sp_meta["paths"]["per_time"][f"{base_key}_depth_weighted"] = f"variants/{variant}/species/{sp}/times/{{time}}/{base_key}_depth_weighted_f32.bin"
@@ -716,7 +723,20 @@ def run_daily(
 
         provider_status: List[Dict[str, Any]] = []
 
-        for ts_iso in ts_list:
+        def _get_layers_for_ts(ts_query: str) -> Dict[str, np.ndarray]:
+            tid_q = id_by_iso[ts_query]
+            if tid_q in layers_cache:
+                return layers_cache[tid_q][0]
+            q_layers, q_status = _try_copernicus_layers(grid, bbox, ts_query, datasets_cfg) if datasets_cfg else (None, {"provider":"none","ok":False,"errors":["no datasets.json"]})
+            if q_layers is None:
+                if strict_cmems:
+                    raise RuntimeError("Copernicus download failed (strict mode): " + "; ".join(q_status.get("errors", [])))
+                q_layers = _synthetic_env_layers(grid, ts_query)
+                q_status = {**q_status, "fallback": "synthetic"}
+            layers_cache[tid_q] = (q_layers, q_status)
+            return q_layers
+
+        for ts_idx, ts_iso in enumerate(ts_list):
             tid = id_by_iso[ts_iso]
 
             if (not force) and (times_root / tid / "pcatch_scoring_f32.bin").exists():
@@ -765,16 +785,25 @@ def run_daily(
                 w_ssh=float(priors.get("front_weights", {}).get("ssh", 0.25)),
             ).astype(np.float32)
 
+            prev_layers = _get_layers_for_ts(ts_list[ts_idx - 1]) if ts_idx > 0 else None
+            next_layers = _get_layers_for_ts(ts_list[ts_idx + 1]) if ts_idx + 1 < len(ts_list) else None
+
             inputs = HabitatInputs(
                 sst_c=layers["sst_c"],
                 chl_mg_m3=layers["chl_mg_m3"],
                 current_m_s=layers["current_m_s"],
                 waves_hs_m=layers["waves_hs_m"],
                 ssh_m=layers["ssh_m"],
+                u_current_m_s=layers.get("u_current_m_s"),
+                v_current_m_s=layers.get("v_current_m_s"),
                 sss_psu=layers.get("sss_psu"),
                 o2_umol_l=layers.get("o2_umol_l"),
                 mld_m=layers.get("mld_m"),
                 npp_mmol_m3_day=layers.get("npp_mmol_m3_day"),
+                prev_u_current_m_s=prev_layers.get("u_current_m_s") if prev_layers else None,
+                prev_v_current_m_s=prev_layers.get("v_current_m_s") if prev_layers else None,
+                next_u_current_m_s=next_layers.get("u_current_m_s") if next_layers else None,
+                next_v_current_m_s=next_layers.get("v_current_m_s") if next_layers else None,
             )
             phab, comps = habitat_scoring(inputs, priors=priors, weights=weights)
             f = np.asarray(comps.get("front_fused", f), dtype=np.float32)
@@ -789,7 +818,7 @@ def run_daily(
 
             front_mult = np.clip(0.9 + 0.3 * f, 0.9, 1.2).astype(np.float32)
             m2 = np.clip(pcatch * front_mult, 0, 1).astype(np.float32)
-            ens = _safe_stack_nanmean([pcatch, m2])
+            ens = np.nanmean(np.stack([pcatch, m2], axis=0), axis=0).astype(np.float32)
             agree, spread = ensemble_stats([pcatch, m2])
 
             depth_raw: Dict[int, Dict[str, np.ndarray]] = {}
@@ -816,6 +845,8 @@ def run_daily(
                     current_m_s=dl["current_m_s"],
                     waves_hs_m=dl["waves_hs_m"],
                     ssh_m=dl["ssh_m"],
+                    u_current_m_s=dl.get("u_current_m_s"),
+                    v_current_m_s=dl.get("v_current_m_s"),
                     sss_psu=dl.get("sss_psu"),
                     o2_umol_l=dl.get("o2_umol_l"),
                     mld_m=dl.get("mld_m"),
@@ -837,11 +868,11 @@ def run_daily(
                 depth_raw[d] = dl
                 depth_phab[d] = dph.astype(np.float32)
                 depth_pops[d] = dpo.astype(np.float32)
-                depth_pcatch[d] = _safe_stack_nanmean([dpc, dm2])
-                depth_front[d] = df
+                depth_comps[d] = dcomps
+                depth_pcatch[d] = np.nanmean(np.stack([dpc, dm2], axis=0), axis=0).astype(np.float32)
+                depth_front[d] = np.asarray(dcomps.get("front_fused", df), dtype=np.float32)
                 depth_agree[d] = dag.astype(np.float32)
                 depth_spread[d] = dsp.astype(np.float32)
-                depth_comps[d] = dcomps
 
             wind = _try_local_era5_wind(grid, _dt_from_time_id(tid), json.loads(cfg_path.read_text(encoding="utf-8")) if (cfg_path:=Path("backend/config/datasets.json")).exists() else {})
             if wind is None:
@@ -884,6 +915,28 @@ def run_daily(
             write_bin_f32(tdir / "front_fused_f32.bin", f)
             write_bin_u8(tdir / "qc_chl_u8.bin", layers["qc_chl"])
             write_bin_f32(tdir / "conf_f32.bin", layers["conf"])
+            prev_am = None
+            next_am = None
+            if prev_layers is not None:
+                prev_inputs = HabitatInputs(
+                    sst_c=prev_layers["sst_c"], chl_mg_m3=prev_layers["chl_mg_m3"], current_m_s=prev_layers["current_m_s"], waves_hs_m=prev_layers["waves_hs_m"],
+                    ssh_m=prev_layers["ssh_m"], u_current_m_s=prev_layers.get("u_current_m_s"), v_current_m_s=prev_layers.get("v_current_m_s"),
+                    sss_psu=prev_layers.get("sss_psu"), o2_umol_l=prev_layers.get("o2_umol_l"), mld_m=prev_layers.get("mld_m"), npp_mmol_m3_day=prev_layers.get("npp_mmol_m3_day")
+                )
+                prev_am = habitat_scoring(prev_inputs, priors=priors, weights=weights)[1].get("ameda_core")
+            if next_layers is not None:
+                next_inputs = HabitatInputs(
+                    sst_c=next_layers["sst_c"], chl_mg_m3=next_layers["chl_mg_m3"], current_m_s=next_layers["current_m_s"], waves_hs_m=next_layers["waves_hs_m"],
+                    ssh_m=next_layers["ssh_m"], u_current_m_s=next_layers.get("u_current_m_s"), v_current_m_s=next_layers.get("v_current_m_s"),
+                    sss_psu=next_layers.get("sss_psu"), o2_umol_l=next_layers.get("o2_umol_l"), mld_m=next_layers.get("mld_m"), npp_mmol_m3_day=next_layers.get("npp_mmol_m3_day")
+                )
+                next_am = habitat_scoring(next_inputs, priors=priors, weights=weights)[1].get("ameda_core")
+            ameda_score = ameda_track_score(prev_am, comps.get("ameda_core", np.zeros_like(phab)), next_am, comps.get("ameda_confidence", np.zeros_like(phab)))
+
+            for kk in ["eddy_eke","eddy_vorticity","eddy_strain","eddy_okubo_weiss","eddy_core","eddy_edge_distance","eddy_polarity","eddy_amplitude","eddy_radius","eddy_opportunity","ameda_proxy","ameda_core","ameda_polarity","ameda_confidence","ftle","fsle","lavd","lcs_ridge","lagrangian_opportunity","ftle_td","fsle_td","lavd_td","lcs_ridge_td","lagrangian_td_opportunity"]:
+                if kk in comps:
+                    write_bin_f32(tdir / f"{kk}_f32.bin", np.asarray(comps[kk], dtype=np.float32))
+            write_bin_f32(tdir / "ameda_track_score_f32.bin", np.asarray(ameda_score, dtype=np.float32))
             write_bin_f32(tdir / "wind_speed_f32.bin", wind["wind_speed_m_s"].astype(np.float32))
             write_bin_f32(tdir / "wind_direction_f32.bin", wind["wind_dir_deg_to"].astype(np.float32))
             write_bin_f32(tdir / "setline_score_f32.bin", setline_score)
@@ -892,6 +945,7 @@ def run_daily(
 
             for d in DEPTH_TARGETS_M:
                 dl = depth_raw[d]
+                dcomps = depth_comps[d]
                 write_bin_f32(tdir / f"sst_depth_{d}m_f32.bin", dl["sst_c"].astype(np.float32))
                 write_bin_f32(tdir / f"chl_depth_{d}m_f32.bin", dl["chl_mg_m3"].astype(np.float32))
                 write_bin_f32(tdir / f"current_depth_{d}m_f32.bin", dl["current_m_s"].astype(np.float32))
@@ -899,13 +953,13 @@ def run_daily(
                 write_bin_f32(tdir / f"sss_depth_{d}m_f32.bin", np.asarray(dl.get("sss_psu", np.full_like(dl["sst_c"], np.nan)), dtype=np.float32))
                 write_bin_f32(tdir / f"o2_depth_{d}m_f32.bin", np.asarray(dl.get("o2_umol_l", np.full_like(dl["sst_c"], np.nan)), dtype=np.float32))
                 write_bin_f32(tdir / f"mld_depth_{d}m_f32.bin", np.asarray(dl.get("mld_m", np.full_like(dl["sst_c"], np.nan)), dtype=np.float32))
-                write_bin_f32(tdir / f"thermocline_depth_{d}m_f32.bin", np.asarray(depth_comps[d].get("thermocline_proxy", np.zeros_like(dl["sst_c"])), dtype=np.float32))
-                write_bin_f32(tdir / f"oxygen_access_depth_{d}m_f32.bin", np.asarray(depth_comps[d].get("oxygen_access", np.zeros_like(dl["sst_c"])), dtype=np.float32))
+                write_bin_f32(tdir / f"thermocline_depth_{d}m_f32.bin", np.asarray(dcomps.get("thermocline_proxy", np.zeros_like(dl["sst_c"])), dtype=np.float32))
+                write_bin_f32(tdir / f"oxygen_access_depth_{d}m_f32.bin", np.asarray(dcomps.get("oxygen_access", np.zeros_like(dl["sst_c"])), dtype=np.float32))
                 write_bin_f32(tdir / f"npp_depth_{d}m_f32.bin", np.asarray(dl.get("npp_mmol_m3_day", np.full_like(dl["sst_c"], np.nan)), dtype=np.float32))
-                write_bin_f32(tdir / f"front_gradient_depth_{d}m_f32.bin", np.asarray(depth_comps[d].get("front_gradient", depth_front[d]), dtype=np.float32))
-                write_bin_f32(tdir / f"front_boa_depth_{d}m_f32.bin", np.asarray(depth_comps[d].get("front_boa", depth_front[d]), dtype=np.float32))
-                write_bin_f32(tdir / f"front_cca_depth_{d}m_f32.bin", np.asarray(depth_comps[d].get("front_cca", depth_front[d]), dtype=np.float32))
-                write_bin_f32(tdir / f"front_gradhist_depth_{d}m_f32.bin", np.asarray(depth_comps[d].get("front_gradhist", depth_front[d]), dtype=np.float32))
+                write_bin_f32(tdir / f"front_gradient_depth_{d}m_f32.bin", np.asarray(dcomps.get("front_gradient", depth_front[d]), dtype=np.float32))
+                write_bin_f32(tdir / f"front_boa_depth_{d}m_f32.bin", np.asarray(dcomps.get("front_boa", depth_front[d]), dtype=np.float32))
+                write_bin_f32(tdir / f"front_cca_depth_{d}m_f32.bin", np.asarray(dcomps.get("front_cca", depth_front[d]), dtype=np.float32))
+                write_bin_f32(tdir / f"front_gradhist_depth_{d}m_f32.bin", np.asarray(dcomps.get("front_gradhist", depth_front[d]), dtype=np.float32))
                 write_bin_f32(tdir / f"front_fused_depth_{d}m_f32.bin", depth_front[d])
                 write_bin_f32(tdir / f"front_depth_{d}m_f32.bin", depth_front[d])
                 write_bin_f32(tdir / f"agree_depth_{d}m_f32.bin", depth_agree[d])
@@ -916,6 +970,9 @@ def run_daily(
                 write_bin_f32(tdir / f"pcatch_scoring_depth_{d}m_f32.bin", np.clip(depth_phab[d] * depth_pops[d], 0, 1).astype(np.float32))
                 write_bin_f32(tdir / f"pcatch_frontplus_depth_{d}m_f32.bin", np.clip((depth_phab[d] * depth_pops[d]) * np.clip(0.9 + 0.3 * depth_front[d], 0.9, 1.2), 0, 1).astype(np.float32))
                 write_bin_f32(tdir / f"pcatch_ensemble_depth_{d}m_f32.bin", depth_pcatch[d])
+                for kk in ["eddy_eke","eddy_vorticity","eddy_strain","eddy_okubo_weiss","eddy_core","eddy_edge_distance","eddy_polarity","eddy_amplitude","eddy_radius","eddy_opportunity","ameda_proxy","ameda_core","ameda_polarity","ameda_confidence","ftle","fsle","lavd","lcs_ridge","lagrangian_opportunity","ftle_td","fsle_td","lavd_td","lcs_ridge_td","lagrangian_td_opportunity"]:
+                    if kk in dcomps:
+                        write_bin_f32(tdir / f"{kk}_depth_{d}m_f32.bin", np.asarray(dcomps[kk], dtype=np.float32))
             weighted_layers = {
                 "sst": _weighted_depth_mean({d: depth_raw[d]["sst_c"] for d in DEPTH_TARGETS_M}),
                 "chl": _weighted_depth_mean({d: depth_raw[d]["chl_mg_m3"] for d in DEPTH_TARGETS_M}),
@@ -940,6 +997,11 @@ def run_daily(
                 "pops": _weighted_depth_mean(depth_pops),
                 "pcatch_ensemble": _weighted_depth_mean(depth_pcatch),
             }
+            for kk in ["eddy_eke","eddy_vorticity","eddy_strain","eddy_okubo_weiss","eddy_core","eddy_edge_distance","eddy_polarity","eddy_amplitude","eddy_radius","eddy_opportunity","ameda_proxy","ameda_core","ameda_polarity","ameda_confidence","ftle","fsle","lavd","lcs_ridge","lagrangian_opportunity","ftle_td","fsle_td","lavd_td","lcs_ridge_td","lagrangian_td_opportunity"]:
+                avail = {d: np.asarray(depth_comps[d][kk], dtype=np.float32) for d in DEPTH_TARGETS_M if kk in depth_comps.get(d, {})}
+                if avail:
+                    weighted_layers[kk] = _weighted_depth_mean(avail)
+            weighted_layers["ameda_track_score"] = np.asarray(ameda_score, dtype=np.float32)
             weighted_layers["pcatch_scoring"] = np.clip(weighted_layers["phab_scoring"] * weighted_layers["pops"], 0, 1).astype(np.float32)
             weighted_layers["pcatch_frontplus"] = np.clip(weighted_layers["pcatch_scoring"] * np.clip(0.9 + 0.3 * weighted_layers["front"], 0.9, 1.2), 0, 1).astype(np.float32)
             for k, arr in weighted_layers.items():
@@ -985,8 +1047,7 @@ def run_daily(
 
         critical = [
             out_root / "meta_index.json",
-            out_root / "meta.json",
-            out_root / "runs" / run_id / "meta.json",
+            out_root / "latest" / "meta.json",
         ]
         for pth in critical:
             if not pth.exists():
