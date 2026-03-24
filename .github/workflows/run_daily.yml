@@ -1,0 +1,104 @@
+name: Run daily + publish docs
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    env:
+      COPERNICUSMARINE_LOG_LEVEL: INFO
+      COPERNICUSMARINE_SERVICE_USERNAME: ${{ secrets.COPERNICUSMARINE_SERVICE_USERNAME }}
+      COPERNICUSMARINE_SERVICE_PASSWORD: ${{ secrets.COPERNICUSMARINE_SERVICE_PASSWORD }}
+      COPERNICUS_MARINE_USERNAME: ${{ secrets.COPERNICUSMARINE_SERVICE_USERNAME }}
+      COPERNICUS_MARINE_PASSWORD: ${{ secrets.COPERNICUSMARINE_SERVICE_PASSWORD }}
+      SEYDYAAR_STRICT_COPERNICUS: "1"
+      SEYDYAAR_REWRITE: "0"
+      SEYDYAAR_TMPDIR: "backend/.seydyaar_tmp"
+      SEYDYAAR_LOG_DIR: "docs/latest/logs"
+      SEYDYAAR_VERIFY_DIR: "docs/latest/verify"
+      SEYDYAAR_PAST_DAYS: "2"
+      SEYDYAAR_FUTURE_DAYS: "8"
+      SEYDYAAR_STEP_HOURS: "6"
+      SEYDYAAR_GRID: "220x220"
+      PYTHONUNBUFFERED: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+          pip install -U copernicusmarine
+
+      - name: Prepare outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${SEYDYAAR_REWRITE:-0}" = "1" ]; then
+            rm -rf docs/latest/runs/main || true
+          fi
+          rm -rf docs/latest/verify docs/latest/logs || true
+          mkdir -p docs/latest/logs docs/latest/verify
+          echo "keep" > docs/latest/logs/keep.txt
+          echo "keep" > docs/latest/verify/keep.txt
+          : > docs/latest/logs/download_manifest.jsonl
+          cat > docs/latest/verify/summary.json <<'JSON'
+          {
+            "ok": false,
+            "note": "placeholder; will be overwritten by pipeline if it runs successfully"
+          }
+          JSON
+
+      - name: Run pipeline
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PYTHONPATH="$GITHUB_WORKSPACE/backend"
+          python -m seydyaar run-daily \
+            --out docs/latest \
+            --past-days "$SEYDYAAR_PAST_DAYS" \
+            --future-days "$SEYDYAAR_FUTURE_DAYS" \
+            --step-hours "$SEYDYAAR_STEP_HOURS" \
+            --grid "$SEYDYAAR_GRID"
+
+      - name: Assert manifest and verify exist
+        if: always()
+        run: |
+          echo "== logs =="
+          ls -lah docs/latest/logs || true
+          test -f docs/latest/logs/download_manifest.jsonl || echo "WARN: manifest missing"
+          echo "== verify =="
+          find docs/latest/verify -maxdepth 3 -type f -print || true
+
+      - name: Upload verify and logs artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: seydyaar_verify_and_logs
+          path: |
+            docs/latest/logs/**
+            docs/latest/verify/**
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Commit and push updated docs
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/latest
+          git commit -m "Update docs/latest (auto)" || echo "No changes to commit"
+          git push
