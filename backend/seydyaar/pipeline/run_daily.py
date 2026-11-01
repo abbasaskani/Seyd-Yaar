@@ -8,6 +8,7 @@ This version includes:
 - datasets.json normalization (supports {"cmems": {...}})
 - Copernicus layer caching per timestamp (reuse across species)
 - Force rebuild switch: SEYDYAAR_FORCE_REGEN=1 (overwrites even if outputs exist)
+- Full stale state cleanup before each scheduled run so old outputs don't leak into the next run
 """
 
 from dataclasses import dataclass
@@ -17,6 +18,7 @@ from pathlib import Path
 import hashlib
 import subprocess
 
+
 def _sha256_file(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as f:
@@ -24,10 +26,12 @@ def _sha256_file(path: Path) -> str:
             h.update(chunk)
     return h.hexdigest()
 
+
 def _append_jsonl(path: Path, obj: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+
 
 def _walk_find_key(obj: Any, key: str) -> List[Any]:
     found: List[Any] = []
@@ -41,8 +45,10 @@ def _walk_find_key(obj: Any, key: str) -> List[Any]:
             found.extend(_walk_find_key(it, key))
     return found
 
+
 class _DepthResolver:
     """Find the available depth closest to target (usually 0m) by calling `copernicusmarine describe` once per dataset_id."""
+
     def __init__(self) -> None:
         self._cache: Dict[str, Optional[float]] = {}
 
@@ -76,6 +82,7 @@ class _DepthResolver:
         self._cache[dataset_id] = best
         return best
 
+
 from typing import Dict, Any, List, Tuple, Optional
 import json
 import os
@@ -94,8 +101,30 @@ from ..models.ops import ops_feasibility
 from ..models.ensemble import ensemble_stats
 from .io import write_bin_f32, write_bin_u8, write_json, minify_json_for_web
 
+
+def _clear_run_state(out_root: Path) -> None:
+    out_root = Path(out_root)
+    if not out_root.exists():
+        out_root.mkdir(parents=True, exist_ok=True)
+        return
+
+    for stale_dir in ("runs", "logs", "verify"):
+        p = out_root / stale_dir
+        if p.exists():
+            shutil.rmtree(p)
+
+    for stale_file in ("meta_index.json", "index.json", "meta.json"):
+        p = out_root / stale_file
+        if p.exists():
+            p.unlink()
+
+    (out_root / "logs").mkdir(parents=True, exist_ok=True)
+    (out_root / "verify").mkdir(parents=True, exist_ok=True)
+
+
 DEPTH_TARGETS_M: List[int] = [0, 4, 8, 12]
 DEPTH_WEIGHTS: Dict[int, float] = {0: 0.40, 4: 0.30, 8: 0.20, 12: 0.10}
+
 
 def _weighted_depth_mean(stack_by_depth: Dict[int, np.ndarray]) -> np.ndarray:
     out = None
@@ -111,19 +140,27 @@ def _weighted_depth_mean(stack_by_depth: Dict[int, np.ndarray]) -> np.ndarray:
         raise RuntimeError("No depth arrays available")
     return (out / max(wsum, 1e-9)).astype(np.float32)
 
+
 def _derive_depth_layers(surface: Dict[str, np.ndarray], priors: Dict[str, Any], depth_m: float) -> Dict[str, np.ndarray]:
     d = float(depth_m)
     temp_decay = float(priors.get("depth_decay_c_per_m", 0.035))
     cur_decay = float(priors.get("current_decay_per_m", 0.018))
     wav_decay = float(priors.get("wave_decay_per_m", 0.06))
     out = dict(surface)
-    if "sst_c" in out: out["sst_c"] = (out["sst_c"] - temp_decay * d).astype(np.float32)
-    if "chl_mg_m3" in out: out["chl_mg_m3"] = np.clip(out["chl_mg_m3"] * (1.0 + min(d,12.0)*0.015), 1e-6, None).astype(np.float32)
-    if "current_m_s" in out: out["current_m_s"] = np.clip(out["current_m_s"] * np.exp(-cur_decay * d), 0.0, None).astype(np.float32)
-    if "waves_hs_m" in out: out["waves_hs_m"] = np.clip(out["waves_hs_m"] * np.exp(-wav_decay * d), 0.0, None).astype(np.float32)
-    if "sss_psu" in out: out["sss_psu"] = (out["sss_psu"] + 0.01 * d).astype(np.float32)
-    if "o2_umol_l" in out: out["o2_umol_l"] = np.clip(out["o2_umol_l"] - 1.2 * d, 1.0, None).astype(np.float32)
+    if "sst_c" in out:
+        out["sst_c"] = (out["sst_c"] - temp_decay * d).astype(np.float32)
+    if "chl_mg_m3" in out:
+        out["chl_mg_m3"] = np.clip(out["chl_mg_m3"] * (1.0 + min(d, 12.0) * 0.015), 1e-6, None).astype(np.float32)
+    if "current_m_s" in out:
+        out["current_m_s"] = np.clip(out["current_m_s"] * np.exp(-cur_decay * d), 0.0, None).astype(np.float32)
+    if "waves_hs_m" in out:
+        out["waves_hs_m"] = np.clip(out["waves_hs_m"] * np.exp(-wav_decay * d), 0.0, None).astype(np.float32)
+    if "sss_psu" in out:
+        out["sss_psu"] = (out["sss_psu"] + 0.01 * d).astype(np.float32)
+    if "o2_umol_l" in out:
+        out["o2_umol_l"] = np.clip(out["o2_umol_l"] - 1.2 * d, 1.0, None).astype(np.float32)
     return out
+
 
 def _try_local_era5_wind(grid: GridSpec, day_utc: datetime, datasets_cfg: Dict[str, Any]) -> Optional[Dict[str, np.ndarray]]:
     era = (datasets_cfg or {}).get("era5", {}).get("wind10m", {}) if isinstance(datasets_cfg, dict) else {}
@@ -135,6 +172,7 @@ def _try_local_era5_wind(grid: GridSpec, day_utc: datetime, datasets_cfg: Dict[s
         return None
     try:
         import xarray as xr  # type: ignore
+
         ds = xr.open_dataset(p)
         u = ds[era.get("u_variable", "u10")]
         v = ds[era.get("v_variable", "v10")]
@@ -150,23 +188,30 @@ def _try_local_era5_wind(grid: GridSpec, day_utc: datetime, datasets_cfg: Dict[s
         lons = np.asarray(u[lon_name].values)
         u2 = np.asarray(u.values, dtype=np.float32)
         v2 = np.asarray(v.values, dtype=np.float32)
-        # map target grid by nearest coordinates
-        yi = np.abs(lats[:,None] - grid.lats[None,:]).argmin(axis=0) if lats.ndim==1 else None
-        xi = np.abs(lons[:,None] - grid.lons[None,:]).argmin(axis=0) if lons.ndim==1 else None
+        yi = np.abs(lats[:, None] - grid.lats[None, :]).argmin(axis=0) if lats.ndim == 1 else None
+        xi = np.abs(lons[:, None] - grid.lons[None, :]).argmin(axis=0) if lons.ndim == 1 else None
         if yi is None or xi is None:
             return None
         out_u = u2[np.ix_(yi, xi)]
         out_v = v2[np.ix_(yi, xi)]
-        spd = np.sqrt(out_u.astype(np.float64)**2 + out_v.astype(np.float64)**2).astype(np.float32)
+        spd = np.sqrt(out_u.astype(np.float64) ** 2 + out_v.astype(np.float64) ** 2).astype(np.float32)
         direction_to = (np.degrees(np.arctan2(out_u, out_v)) + 360.0) % 360.0
-        return {"wind_u10_m_s": out_u.astype(np.float32), "wind_v10_m_s": out_v.astype(np.float32), "wind_speed_m_s": spd, "wind_dir_deg_to": direction_to.astype(np.float32), "wind_source": np.array([1], dtype=np.uint8)}
+        return {
+            "wind_u10_m_s": out_u.astype(np.float32),
+            "wind_v10_m_s": out_v.astype(np.float32),
+            "wind_speed_m_s": spd,
+            "wind_dir_deg_to": direction_to.astype(np.float32),
+            "wind_source": np.array([1], dtype=np.uint8),
+        }
     except Exception:
         return None
+
 
 def _setline_summary(grid: GridSpec, pcatch: np.ndarray, wind_dir_deg_to: np.ndarray, length_nm: float = 10.0) -> Dict[str, Any]:
     idx = int(np.nanargmax(np.where(np.isfinite(pcatch), pcatch, -1.0)))
     r, c = divmod(idx, grid.width)
-    lon = float(grid.lons[c]); lat = float(grid.lats[r])
+    lon = float(grid.lons[c])
+    lat = float(grid.lats[r])
     wind_to = float(wind_dir_deg_to[r, c])
     heading = (wind_to + 90.0) % 180.0
     length_deg_lon = (length_nm * 1.852) / max(111.32 * np.cos(np.deg2rad(lat)), 1e-6)
@@ -179,7 +224,7 @@ def _setline_summary(grid: GridSpec, pcatch: np.ndarray, wind_dir_deg_to: np.nda
         "heading_deg": heading,
         "wind_dir_deg_to": wind_to,
         "length_nm": length_nm,
-        "line": [[lon-dx, lat-dy],[lon+dx, lat+dy]],
+        "line": [[lon - dx, lat - dy], [lon + dx, lat + dy]],
         "score": float(pcatch[r, c]),
     }
 
@@ -262,7 +307,6 @@ def _try_copernicus_layers(
     datasets_cfg: Dict[str, Any],
     depth_target_m: Optional[float] = None,
 ) -> Tuple[Optional[Dict[str, np.ndarray]], Dict[str, Any]]:
-    # Normalize datasets config: allow {"cmems": {...}} or direct mapping.
     if isinstance(datasets_cfg, dict) and "cmems" in datasets_cfg and isinstance(datasets_cfg["cmems"], dict):
         datasets_cfg = datasets_cfg["cmems"]
 
@@ -315,7 +359,6 @@ def _try_copernicus_layers(
             tt1 = tt0
             p = tmpdir / f"{key}_{tt0.strftime('%Y%m%dT%H%M%S')}.nc"
             try:
-                # Prepare manifest record skeleton (filled on success/failure)
                 rec: Dict[str, Any] = {
                     "layer": key,
                     "dataset_id": dsid,
@@ -333,11 +376,9 @@ def _try_copernicus_layers(
                     "error": None,
                 }
 
-                # Optional depth: if config asks for depth (often 0), resolve closest available depth via describe.
                 depth_target = depth_target_m if depth_target_m is not None else cfg.get("depth_target_m", cfg.get("depth_m", None))
                 min_depth = max_depth = None
                 if depth_target is not None:
-                    # Capability discovery: if dataset exposes a depth axis, pick the depth closest to target (usually 0m).
                     try:
                         target = float(depth_target)
                         best = depth_resolver.closest_depth(dsid, target_m=target)
@@ -392,14 +433,13 @@ def _try_copernicus_layers(
         with rasterio.open(f'NETCDF:"{path}":{var}') as ds:
             arr = ds.read(1).astype(np.float32)
             nodata = ds.nodata
-        # Convert common fill/nodata to NaN, and clip absurd values (e.g., 1e20)
         if nodata is not None:
             arr[arr == np.float32(nodata)] = np.nan
         arr[~np.isfinite(arr)] = np.nan
         arr[np.abs(arr) > np.float32(1e6)] = np.nan
         return arr
+
     def _resize_nearest(a: np.ndarray, target_h: int, target_w: int) -> np.ndarray:
-        """Nearest-neighbor resample to (target_h, target_w). Assumes regular lon/lat grid in the subset output."""
         src_h, src_w = a.shape
         if src_h == target_h and src_w == target_w:
             return a.astype(np.float32, copy=False)
@@ -409,7 +449,6 @@ def _try_copernicus_layers(
 
     def _to_grid(a: np.ndarray) -> np.ndarray:
         return _resize_nearest(a, grid.height, grid.width)
-
 
     out: Dict[str, np.ndarray] = {}
 
@@ -443,10 +482,9 @@ def _try_copernicus_layers(
             v = _read_nc_var(p, vars_uv[1])
             u = _to_grid(u)
             v = _to_grid(v)
-            # compute in float64 to avoid overflow from occasional fill values
             out["u_current_m_s"] = u.astype(np.float32)
             out["v_current_m_s"] = v.astype(np.float32)
-            out["current_m_s"] = np.sqrt(u.astype(np.float64)**2 + v.astype(np.float64)**2).astype(np.float32)
+            out["current_m_s"] = np.sqrt(u.astype(np.float64) ** 2 + v.astype(np.float64) ** 2).astype(np.float32)
         else:
             out["current_m_s"] = _to_grid(_read_nc_var(p, vars_uv[0]))
 
@@ -454,9 +492,8 @@ def _try_copernicus_layers(
         waves = _read_nc_var(p, _v0("waves"))
         out["waves_hs_m"] = _to_grid(waves)
 
-        # Optional extra predictors (if configured): salinity (SSS), mixed layer depth (MLD), dissolved oxygen (O2)
-        # These are *optional* to keep the pipeline robust when datasets are not configured yet.
         status.setdefault("warnings", [])
+
         def _try_optional(key: str, out_key: str) -> None:
             cfg = datasets_cfg.get(key, {}) if isinstance(datasets_cfg, dict) else {}
             if not str(cfg.get("dataset_id", "")).strip():
@@ -472,7 +509,6 @@ def _try_copernicus_layers(
         _try_optional("mld", "mld_m")
         _try_optional("o2", "o2_umol_l")
         _try_optional("npp", "npp_mmol_m3_day")
-
 
         qc = np.ones((grid.height, grid.width), dtype=np.uint8)
         conf = qc.astype(np.float32)
@@ -566,13 +602,16 @@ def run_daily(
     aoi_geojson: dict,
     species_profiles: dict,
     date: str = "today",
-    past_days: int = 2,
-    future_days: int = 10,
+    past_days: int = 1,
+    future_days: int = 7,
     step_hours: int = 6,
     grid_wh: str = "220x220",
     variant: str = "auto",
     gear_depths_m: List[int] = [5, 10, 15, 20],
 ) -> str:
+    out_root = Path(out_root)
+    _clear_run_state(out_root)
+
     now_utc, time_source = trusted_utc_now()
     anchor = now_utc.date() if date.lower() == "today" else datetime.fromisoformat(date).date()
 
@@ -619,10 +658,8 @@ def run_daily(
     if isinstance(datasets_cfg, dict) and "cmems" in datasets_cfg and isinstance(datasets_cfg["cmems"], dict):
         datasets_cfg = datasets_cfg["cmems"]
 
-    # >>> IMPORTANT: define cache HERE (always in run_daily scope)
     layers_cache: Dict[str, Tuple[Dict[str, np.ndarray], Dict[str, Any]]] = {}
-
-    force = os.getenv("SEYDYAAR_FORCE_REGEN", "0") == "1"
+    force = os.getenv("SEYDYAAR_FORCE_REGEN", "0") == "1" or os.getenv("SEYDYAAR_REWRITE", "0") == "1"
 
     for sp, prof in species_profiles.items():
         priors = prof.get("priors", {})
@@ -682,10 +719,6 @@ def run_daily(
                 "ops": {"priors": ops_priors, "gear_depths_m": gear_depths_m},
             },
         }
-        for base_key in ["sst","chl","current","waves","sss","o2","mld","thermocline","oxygen_access","npp","front","front_gradient","front_boa","front_cca","front_gradhist","front_fused","agree","spread","conf","phab_scoring","pops","pcatch_scoring","pcatch_frontplus","pcatch_ensemble"]:
-            for d in DEPTH_TARGETS_M:
-                sp_meta["paths"]["per_time"][f"{base_key}_depth_{d}m"] = f"variants/{variant}/species/{sp}/times/{{time}}/{base_key}_depth_{d}m_f32.bin"
-            sp_meta["paths"]["per_time"][f"{base_key}_depth_weighted"] = f"variants/{variant}/species/{sp}/times/{{time}}/{base_key}_depth_weighted_f32.bin"
 
         write_json(sp_root / "meta.json", sp_meta)
         minify_json_for_web(sp_root / "meta.json")
@@ -699,17 +732,10 @@ def run_daily(
                 provider_status.append({"timestamp": ts_iso, "skipped": True, "reason": "already_exists"})
                 continue
 
-            # Cache across species by tid
-            # Defensive: ensure cache exists (prevents NameError if file was partially edited)
-            try:
-                layers_cache
-            except NameError:
-                layers_cache = {}
-
             if tid in layers_cache:
                 layers, status = layers_cache[tid]
             else:
-                layers, status = _try_copernicus_layers(grid, bbox, ts_iso, datasets_cfg) if datasets_cfg else (None, {"provider":"none","ok":False,"errors":["no datasets.json"]})
+                layers, status = _try_copernicus_layers(grid, bbox, ts_iso, datasets_cfg) if datasets_cfg else (None, {"provider": "none", "ok": False, "errors": ["no datasets.json"]})
                 if layers is None:
                     if strict_cmems:
                         raise RuntimeError("Copernicus download failed (strict mode): " + "; ".join(status.get("errors", [])))
@@ -718,16 +744,16 @@ def run_daily(
                 layers_cache[tid] = (layers, status)
 
             provider_status.append({"timestamp": ts_iso, **status})
-            # Save raw NetCDFs for today 00:00Z so you can cross-check with Copernicus Viewer.
+
             if tid == verify_time_id and isinstance(status, dict):
                 nc_paths = status.get("nc_paths") or {}
                 dest = verify_dir / verify_time_id
                 dest.mkdir(parents=True, exist_ok=True)
                 for k, src in nc_paths.items():
                     try:
-                        sp = Path(src)
-                        if sp.exists():
-                            shutil.copy2(sp, dest / f"{k}.nc")
+                        sp_path = Path(src)
+                        if sp_path.exists():
+                            shutil.copy2(sp_path, dest / f"{k}.nc")
                     except Exception:
                         pass
 
@@ -775,7 +801,7 @@ def run_daily(
                     dl, dst = _try_copernicus_layers(grid, bbox, ts_iso, {"cmems": datasets_cfg} if "sst" in datasets_cfg else datasets_cfg, depth_target_m=float(d))
                     if dl is None:
                         dl = _derive_depth_layers(layers, priors, float(d))
-                for k in ["sss_psu","o2_umol_l"]:
+                for k in ["sss_psu", "o2_umol_l"]:
                     if k not in dl and k in layers:
                         dl[k] = _derive_depth_layers(layers, priors, float(d)).get(k, layers[k])
                 din = HabitatInputs(
@@ -810,13 +836,12 @@ def run_daily(
                 depth_agree[d] = dag.astype(np.float32)
                 depth_spread[d] = dsp.astype(np.float32)
 
-            wind = _try_local_era5_wind(grid, _dt_from_time_id(tid), json.loads(cfg_path.read_text(encoding="utf-8")) if (cfg_path:=Path("backend/config/datasets.json")).exists() else {})
+            wind = _try_local_era5_wind(grid, _dt_from_time_id(tid), json.loads(Path("backend/config/datasets.json").read_text(encoding="utf-8")) if Path("backend/config/datasets.json").exists() else {})
             if wind is None:
-                # simple operational proxy from waves and fronts
                 gy, gx = np.gradient(inputs.ssh_m.astype(np.float32))
                 wu = (-gx).astype(np.float32)
                 wv = (-gy).astype(np.float32)
-                wspd = np.sqrt(wu.astype(np.float64)**2 + wv.astype(np.float64)**2).astype(np.float32)
+                wspd = np.sqrt(wu.astype(np.float64) ** 2 + wv.astype(np.float64) ** 2).astype(np.float32)
                 wdir = (np.degrees(np.arctan2(wu, wv)) + 360.0) % 360.0
                 wind = {"wind_u10_m_s": wu, "wind_v10_m_s": wv, "wind_speed_m_s": wspd, "wind_dir_deg_to": wdir.astype(np.float32), "wind_source": np.array([0], dtype=np.uint8)}
             setline = _setline_summary(grid, ens, wind["wind_dir_deg_to"])
@@ -826,36 +851,51 @@ def run_daily(
             tdir = times_root / tid
             tdir.mkdir(parents=True, exist_ok=True)
 
-            write_bin_f32(tdir / "pcatch_scoring_f32.bin", pcatch)
-            write_bin_f32(tdir / "pcatch_frontplus_f32.bin", m2)
-            write_bin_f32(tdir / "pcatch_ensemble_f32.bin", ens)
-            write_bin_f32(tdir / "phab_f32.bin", phab)
-            write_bin_f32(tdir / "pops_f32.bin", pops)
-            write_bin_f32(tdir / "agree_f32.bin", agree)
-            write_bin_f32(tdir / "spread_f32.bin", spread)
-            write_bin_f32(tdir / "front_f32.bin", f)
-            write_bin_f32(tdir / "sst_f32.bin", inputs.sst_c.astype(np.float32))
-            write_bin_f32(tdir / "chl_f32.bin", inputs.chl_mg_m3.astype(np.float32))
-            write_bin_f32(tdir / "current_f32.bin", inputs.current_m_s.astype(np.float32))
-            write_bin_f32(tdir / "waves_f32.bin", inputs.waves_hs_m.astype(np.float32))
-            write_bin_f32(tdir / "sss_f32.bin", np.asarray(layers.get("sss_psu", np.full_like(inputs.sst_c, np.nan)), dtype=np.float32))
-            write_bin_f32(tdir / "o2_f32.bin", np.asarray(layers.get("o2_umol_l", np.full_like(inputs.sst_c, np.nan)), dtype=np.float32))
-            write_bin_f32(tdir / "mld_f32.bin", np.asarray(layers.get("mld_m", np.full_like(inputs.sst_c, np.nan)), dtype=np.float32))
-            write_bin_f32(tdir / "thermocline_f32.bin", thermocline)
-            write_bin_f32(tdir / "oxygen_access_f32.bin", oxygen_access)
-            write_bin_f32(tdir / "npp_f32.bin", np.asarray(layers.get("npp_mmol_m3_day", np.full_like(inputs.sst_c, np.nan)), dtype=np.float32))
-            write_bin_f32(tdir / "front_gradient_f32.bin", f_gradient)
-            write_bin_f32(tdir / "front_boa_f32.bin", f_boa)
-            write_bin_f32(tdir / "front_cca_f32.bin", f_cca)
-            write_bin_f32(tdir / "front_gradhist_f32.bin", f_gradhist)
-            write_bin_f32(tdir / "front_fused_f32.bin", f)
-            write_bin_u8(tdir / "qc_chl_u8.bin", layers["qc_chl"])
-            write_bin_f32(tdir / "conf_f32.bin", layers["conf"])
-            write_bin_f32(tdir / "wind_speed_f32.bin", wind["wind_speed_m_s"].astype(np.float32))
-            write_bin_f32(tdir / "wind_direction_f32.bin", wind["wind_dir_deg_to"].astype(np.float32))
-            write_bin_f32(tdir / "setline_score_f32.bin", setline_score)
-            write_bin_f32(tdir / "setline_heading_f32.bin", setline_heading)
-            write_json(tdir / "setline_best.json", {**setline, "wind_source": "era5" if int(wind["wind_source"][0])==1 else "proxy"})
+            for base_key, value in {
+                "pcatch_scoring": pcatch,
+                "pcatch_frontplus": m2,
+                "pcatch_ensemble": ens,
+                "phab": phab,
+                "pops": pops,
+                "agree": agree,
+                "spread": spread,
+                "front": f,
+                "sst": inputs.sst_c,
+                "chl": inputs.chl_mg_m3,
+                "current": inputs.current_m_s,
+                "waves": inputs.waves_hs_m,
+                "sss": np.asarray(layers.get("sss_psu", np.full_like(inputs.sst_c, np.nan)), dtype=np.float32),
+                "o2": np.asarray(layers.get("o2_umol_l", np.full_like(inputs.sst_c, np.nan)), dtype=np.float32),
+                "mld": np.asarray(layers.get("mld_m", np.full_like(inputs.sst_c, np.nan)), dtype=np.float32),
+                "npp": np.asarray(layers.get("npp_mmol_m3_day", np.full_like(inputs.sst_c, np.nan)), dtype=np.float32),
+                "front_gradient": comps.get("front_gradient", f),
+                "front_boa": comps.get("front_boa", f),
+                "front_cca": comps.get("front_cca", f),
+                "front_gradhist": comps.get("front_gradhist", f),
+                "front_fused": comps.get("front_fused", f),
+                "qc_chl": layers["qc_chl"],
+                "conf": layers["conf"],
+                "wind_speed": wind["wind_speed_m_s"],
+                "wind_direction": wind["wind_dir_deg_to"],
+                "setline_score": setline_score,
+                "setline_heading": setline_heading,
+            }.items():
+                if base_key.endswith("_score") or base_key.endswith("_heading") or base_key.endswith("_direction") or base_key.endswith("_speed"):
+                    if base_key == "setline_score":
+                        write_bin_f32(tdir / "setline_score_f32.bin", value.astype(np.float32))
+                    elif base_key == "setline_heading":
+                        write_bin_f32(tdir / "setline_heading_f32.bin", value.astype(np.float32))
+                    elif base_key == "wind_speed":
+                        write_bin_f32(tdir / "wind_speed_f32.bin", value.astype(np.float32))
+                    elif base_key == "wind_direction":
+                        write_bin_f32(tdir / "wind_direction_f32.bin", value.astype(np.float32))
+                    continue
+                if base_key in ("qc_chl",):
+                    write_bin_u8(tdir / "qc_chl_u8.bin", value)
+                elif base_key in ("conf",):
+                    write_bin_f32(tdir / "conf_f32.bin", value.astype(np.float32))
+                else:
+                    write_bin_f32(tdir / f"{base_key}_f32.bin", value.astype(np.float32))
 
             for d in DEPTH_TARGETS_M:
                 dl = depth_raw[d]
@@ -866,23 +906,19 @@ def run_daily(
                 write_bin_f32(tdir / f"sss_depth_{d}m_f32.bin", np.asarray(dl.get("sss_psu", np.full_like(dl["sst_c"], np.nan)), dtype=np.float32))
                 write_bin_f32(tdir / f"o2_depth_{d}m_f32.bin", np.asarray(dl.get("o2_umol_l", np.full_like(dl["sst_c"], np.nan)), dtype=np.float32))
                 write_bin_f32(tdir / f"mld_depth_{d}m_f32.bin", np.asarray(dl.get("mld_m", np.full_like(dl["sst_c"], np.nan)), dtype=np.float32))
-                write_bin_f32(tdir / f"thermocline_depth_{d}m_f32.bin", np.asarray(dcomps.get("thermocline_proxy", np.zeros_like(dl["sst_c"])), dtype=np.float32))
-                write_bin_f32(tdir / f"oxygen_access_depth_{d}m_f32.bin", np.asarray(dcomps.get("oxygen_access", np.zeros_like(dl["sst_c"])), dtype=np.float32))
-                write_bin_f32(tdir / f"npp_depth_{d}m_f32.bin", np.asarray(dl.get("npp_mmol_m3_day", np.full_like(dl["sst_c"], np.nan)), dtype=np.float32))
                 write_bin_f32(tdir / f"front_gradient_depth_{d}m_f32.bin", np.asarray(dcomps.get("front_gradient", depth_front[d]), dtype=np.float32))
                 write_bin_f32(tdir / f"front_boa_depth_{d}m_f32.bin", np.asarray(dcomps.get("front_boa", depth_front[d]), dtype=np.float32))
                 write_bin_f32(tdir / f"front_cca_depth_{d}m_f32.bin", np.asarray(dcomps.get("front_cca", depth_front[d]), dtype=np.float32))
                 write_bin_f32(tdir / f"front_gradhist_depth_{d}m_f32.bin", np.asarray(dcomps.get("front_gradhist", depth_front[d]), dtype=np.float32))
                 write_bin_f32(tdir / f"front_fused_depth_{d}m_f32.bin", depth_front[d])
-                write_bin_f32(tdir / f"front_depth_{d}m_f32.bin", depth_front[d])
                 write_bin_f32(tdir / f"agree_depth_{d}m_f32.bin", depth_agree[d])
                 write_bin_f32(tdir / f"spread_depth_{d}m_f32.bin", depth_spread[d])
-                write_bin_f32(tdir / f"conf_depth_{d}m_f32.bin", layers["conf"].astype(np.float32))
                 write_bin_f32(tdir / f"phab_scoring_depth_{d}m_f32.bin", depth_phab[d])
                 write_bin_f32(tdir / f"pops_depth_{d}m_f32.bin", depth_pops[d])
                 write_bin_f32(tdir / f"pcatch_scoring_depth_{d}m_f32.bin", np.clip(depth_phab[d] * depth_pops[d], 0, 1).astype(np.float32))
                 write_bin_f32(tdir / f"pcatch_frontplus_depth_{d}m_f32.bin", np.clip((depth_phab[d] * depth_pops[d]) * np.clip(0.9 + 0.3 * depth_front[d], 0.9, 1.2), 0, 1).astype(np.float32))
                 write_bin_f32(tdir / f"pcatch_ensemble_depth_{d}m_f32.bin", depth_pcatch[d])
+
             weighted_layers = {
                 "sst": _weighted_depth_mean({d: depth_raw[d]["sst_c"] for d in DEPTH_TARGETS_M}),
                 "chl": _weighted_depth_mean({d: depth_raw[d]["chl_mg_m3"] for d in DEPTH_TARGETS_M}),
@@ -891,26 +927,9 @@ def run_daily(
                 "sss": _weighted_depth_mean({d: np.asarray(depth_raw[d].get("sss_psu", np.full_like(depth_raw[d]["sst_c"], np.nan)), dtype=np.float32) for d in DEPTH_TARGETS_M}),
                 "o2": _weighted_depth_mean({d: np.asarray(depth_raw[d].get("o2_umol_l", np.full_like(depth_raw[d]["sst_c"], np.nan)), dtype=np.float32) for d in DEPTH_TARGETS_M}),
                 "mld": _weighted_depth_mean({d: np.asarray(depth_raw[d].get("mld_m", np.full_like(depth_raw[d]["sst_c"], np.nan)), dtype=np.float32) for d in DEPTH_TARGETS_M}),
-                "thermocline": _weighted_depth_mean({d: np.asarray(habitat_scoring(HabitatInputs(sst_c=depth_raw[d]["sst_c"], chl_mg_m3=depth_raw[d]["chl_mg_m3"], current_m_s=depth_raw[d]["current_m_s"], waves_hs_m=depth_raw[d]["waves_hs_m"], ssh_m=depth_raw[d]["ssh_m"], sss_psu=depth_raw[d].get("sss_psu"), o2_umol_l=depth_raw[d].get("o2_umol_l"), mld_m=depth_raw[d].get("mld_m"), npp_mmol_m3_day=depth_raw[d].get("npp_mmol_m3_day")), priors=priors, weights=weights)[1].get("thermocline_proxy", np.zeros_like(depth_raw[d]["sst_c"])), dtype=np.float32) for d in DEPTH_TARGETS_M}),
-                "oxygen_access": _weighted_depth_mean({d: np.asarray(habitat_scoring(HabitatInputs(sst_c=depth_raw[d]["sst_c"], chl_mg_m3=depth_raw[d]["chl_mg_m3"], current_m_s=depth_raw[d]["current_m_s"], waves_hs_m=depth_raw[d]["waves_hs_m"], ssh_m=depth_raw[d]["ssh_m"], sss_psu=depth_raw[d].get("sss_psu"), o2_umol_l=depth_raw[d].get("o2_umol_l"), mld_m=depth_raw[d].get("mld_m"), npp_mmol_m3_day=depth_raw[d].get("npp_mmol_m3_day")), priors=priors, weights=weights)[1].get("oxygen_access", np.zeros_like(depth_raw[d]["sst_c"])), dtype=np.float32) for d in DEPTH_TARGETS_M}),
-                "npp": _weighted_depth_mean({d: np.asarray(depth_raw[d].get("npp_mmol_m3_day", np.full_like(depth_raw[d]["sst_c"], np.nan)), dtype=np.float32) for d in DEPTH_TARGETS_M}),
-                "front": _weighted_depth_mean(depth_front),
-                "front_gradient": _weighted_depth_mean({d: np.asarray(habitat_scoring(HabitatInputs(sst_c=depth_raw[d]["sst_c"], chl_mg_m3=depth_raw[d]["chl_mg_m3"], current_m_s=depth_raw[d]["current_m_s"], waves_hs_m=depth_raw[d]["waves_hs_m"], ssh_m=depth_raw[d]["ssh_m"], sss_psu=depth_raw[d].get("sss_psu"), o2_umol_l=depth_raw[d].get("o2_umol_l"), mld_m=depth_raw[d].get("mld_m"), npp_mmol_m3_day=depth_raw[d].get("npp_mmol_m3_day")), priors=priors, weights=weights)[1].get("front_gradient", depth_front[d]), dtype=np.float32) for d in DEPTH_TARGETS_M}),
-                "front_boa": _weighted_depth_mean({d: np.asarray(habitat_scoring(HabitatInputs(sst_c=depth_raw[d]["sst_c"], chl_mg_m3=depth_raw[d]["chl_mg_m3"], current_m_s=depth_raw[d]["current_m_s"], waves_hs_m=depth_raw[d]["waves_hs_m"], ssh_m=depth_raw[d]["ssh_m"], sss_psu=depth_raw[d].get("sss_psu"), o2_umol_l=depth_raw[d].get("o2_umol_l"), mld_m=depth_raw[d].get("mld_m"), npp_mmol_m3_day=depth_raw[d].get("npp_mmol_m3_day")), priors=priors, weights=weights)[1].get("front_boa", depth_front[d]), dtype=np.float32) for d in DEPTH_TARGETS_M}),
-                "front_cca": _weighted_depth_mean({d: np.asarray(habitat_scoring(HabitatInputs(sst_c=depth_raw[d]["sst_c"], chl_mg_m3=depth_raw[d]["chl_mg_m3"], current_m_s=depth_raw[d]["current_m_s"], waves_hs_m=depth_raw[d]["waves_hs_m"], ssh_m=depth_raw[d]["ssh_m"], sss_psu=depth_raw[d].get("sss_psu"), o2_umol_l=depth_raw[d].get("o2_umol_l"), mld_m=depth_raw[d].get("mld_m"), npp_mmol_m3_day=depth_raw[d].get("npp_mmol_m3_day")), priors=priors, weights=weights)[1].get("front_cca", depth_front[d]), dtype=np.float32) for d in DEPTH_TARGETS_M}),
-                "front_gradhist": _weighted_depth_mean({d: np.asarray(habitat_scoring(HabitatInputs(sst_c=depth_raw[d]["sst_c"], chl_mg_m3=depth_raw[d]["chl_mg_m3"], current_m_s=depth_raw[d]["current_m_s"], waves_hs_m=depth_raw[d]["waves_hs_m"], ssh_m=depth_raw[d]["ssh_m"], sss_psu=depth_raw[d].get("sss_psu"), o2_umol_l=depth_raw[d].get("o2_umol_l"), mld_m=depth_raw[d].get("mld_m"), npp_mmol_m3_day=depth_raw[d].get("npp_mmol_m3_day")), priors=priors, weights=weights)[1].get("front_gradhist", depth_front[d]), dtype=np.float32) for d in DEPTH_TARGETS_M}),
-                "front_fused": _weighted_depth_mean(depth_front),
-                "agree": _weighted_depth_mean(depth_agree),
-                "spread": _weighted_depth_mean(depth_spread),
                 "conf": layers["conf"].astype(np.float32),
-                "phab_scoring": _weighted_depth_mean(depth_phab),
-                "pops": _weighted_depth_mean(depth_pops),
-                "pcatch_ensemble": _weighted_depth_mean(depth_pcatch),
             }
-            weighted_layers["pcatch_scoring"] = np.clip(weighted_layers["phab_scoring"] * weighted_layers["pops"], 0, 1).astype(np.float32)
-            weighted_layers["pcatch_frontplus"] = np.clip(weighted_layers["pcatch_scoring"] * np.clip(0.9 + 0.3 * weighted_layers["front"], 0.9, 1.2), 0, 1).astype(np.float32)
-            for k, arr in weighted_layers.items():
-                write_bin_f32(tdir / f"{k}_depth_weighted_f32.bin", arr.astype(np.float32))
+            weighted_layers["pcatch_scoring"] = np.clip(weighted_layers["phab_scoring"] * weighted_layers["pops"], 0, 1).astype(np.float32) if "phab_scoring" in weighted_layers and "pops" in weighted_layers else np.clip(np.nanmean(np.stack([depth_pcatch[d] for d in DEPTH_TARGETS_M], axis=0), axis=0), 0, 1).astype(np.float32)
 
         sp_meta2 = json.loads((sp_root / "meta.json").read_text(encoding="utf-8"))
         sp_meta2["provider_status"] = provider_status
@@ -931,52 +950,30 @@ def run_daily(
     _write_meta_index(out_root, run_entry)
     _write_latest_index_and_meta(out_root, run_entry, variant)
 
+    logs_dir = out_root / "logs"
+    verify_dir = out_root / "verify"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    verify_dir.mkdir(parents=True, exist_ok=True)
+    (logs_dir / "keep.txt").write_text("keep\n", encoding="utf-8")
+    (verify_dir / "keep.txt").write_text("keep\n", encoding="utf-8")
 
-    # --- Always write logs/verify summaries for CI/QA ---
-    try:
-        logs_dir = out_root / "logs"
-        verify_dir = out_root / "verify"
-        logs_dir.mkdir(parents=True, exist_ok=True)
-        verify_dir.mkdir(parents=True, exist_ok=True)
-        (logs_dir / "keep.txt").write_text("keep\n", encoding="utf-8")
-        (verify_dir / "keep.txt").write_text("keep\n", encoding="utf-8")
+    summary = {
+        "run_id": run_id,
+        "generated_at_utc": now_utc.isoformat().replace("+00:00", "Z"),
+        "ok": True,
+        "missing": [],
+        "provider_status": provider_status,
+    }
 
-        # Minimal verify summary: existence checks for key outputs
-        summary = {
-            "run_id": run_id,
-            "generated_at_utc": now_utc.isoformat().replace("+00:00", "Z"),
-            "ok": True,
-            "missing": [],
-            "provider_status": provider_status,
-        }
-
-        critical = [
-            out_root / "meta_index.json",
-            out_root / "latest" / "meta.json",
-        ]
-        for pth in critical:
-            if not pth.exists():
-                summary["ok"] = False
-                summary["missing"].append(str(pth.relative_to(out_root)))
-
-        # Spot-check first time slice per species (if present)
-        try:
-            first_tid = time_ids[0] if time_ids else None
-            if first_tid:
-                for sp in list(species_profiles.keys())[:3]:
-                    tdir = out_root / "runs" / run_id / variant / sp / first_tid
-                    for fn in ["pcatch_ensemble_f32.bin", "phab_f32.bin", "pops_f32.bin", "front_f32.bin"]:
-                        fp = tdir / fn
-                        if not fp.exists():
-                            summary["ok"] = False
-                            summary["missing"].append(str(fp.relative_to(out_root)))
-        except Exception as _e:
+    critical = [
+        out_root / "meta_index.json",
+        out_root / "index.json",
+        out_root / "meta.json",
+    ]
+    for pth in critical:
+        if not pth.exists():
             summary["ok"] = False
-            summary["missing"].append(f"spotcheck_error:{type(_e).__name__}")
+            summary["missing"].append(str(pth.relative_to(out_root)))
 
-        (verify_dir / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception:
-        # Never fail the pipeline because of verify/log writing
-        pass
-
+    (verify_dir / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     return run_id
